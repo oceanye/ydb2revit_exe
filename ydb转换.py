@@ -1,7 +1,7 @@
 # This is a sample Python script.
 # coding:utf-8
 
-import tinker
+#import tinker
 # Press Shift+F10 to execute it or replace it with your code.
 # Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
 import os
@@ -271,6 +271,103 @@ for p in range(len(stdflrid)):
             for j in range(len(brsectinfo)):
                 if brsect[i] == brsectid[j] and brstdflr[i] in stdflrid:
                     bsection.append("'" + brsectinfo[j] + "'")
+
+
+
+# wall data
+wgrid = []
+wsect = []
+wstdflr = []
+wid = []
+whd1 = []
+whd2 = []
+
+
+c = cnR.cursor()
+cursor11 = c.execute("SELECT GridID,SectID,StdFlrID,ID,HDiff1,HDiff2 from tblWallSeg")
+for row in cursor11:
+    wgrid.append(row[0])
+    wsect.append(row[1])
+    wstdflr.append(row[2])
+    wid.append(row[3])
+    whd1.append(row[4])
+    whd2.append(row[5])
+cnR.commit()
+
+
+wsectid=[]
+wsectinfo=[]
+c = cnR.cursor()
+cursor12 = c.execute("SELECT ID,B,H,T2,Dis from tblWallSect")
+for row in cursor12:
+    wsectid.append(row[0])
+    wsectinfo.append(str(row[1])+"@"+str(row[2])+"@"+str(row[3])+"@"+str(row[4]))
+cnR.commit()
+
+
+w = []
+
+wstartx= []
+wstarty= []
+wstartz= []
+wfloor=[]
+
+for p in range(len(stdflrid)):
+    for i in range(len(wgrid)):
+        if wstdflr[i] == stdflrid[p]:
+            for j in range(len(gridid)):
+                if wgrid[i] == gridid[j]:
+                    for k in range(len(jtid)):
+                        if bjt1[j] == jtid[k]:
+                            wstartx.append(bjtx[k])
+                            wstarty.append(bjty[k])
+                            wstartz.append(jhdiff[k])
+
+                            wfloor.append(stdflrid[p])
+                            w.append(bid[i])
+
+
+for i in range(len(wfloor)):
+    for j in range(len(stdflrid)):
+        if wfloor[i] == stdflrid[j]:
+            wfloor[i] = levelb[j]
+
+
+
+wendx= []
+wendy= []
+wendz= []
+
+for p in range(len(stdflrid)):
+    for i in range(len(wgrid)):
+        if wstdflr[i] == stdflrid[p]:
+            for j in range(len(gridid)):
+                if wgrid[i] == gridid[j]:
+                    for k in range(len(jtid)):
+                        if bjt1[j] == jtid[k]:
+                            wendx.append(bjtx[k])
+                            wendy.append(bjty[k])
+                            wendz.append(jhdiff[k])
+
+
+#for p in range(len(stdflrid)):
+#    for i in range(len(grid)):
+#        if wstdflr[i] == stdflrid[p]:
+#            bstartz.append(levelb[p] + height[p])
+#            bendz.append(levelb[p] + height[p])
+
+# for i in range(len(bstartz)):
+#     bstartz[i] = bstartz[i] + bstartz2[i]
+#     bendz[i] = bendz[i] + bendz2[i]
+
+wsection=[]
+for p in range(len(stdflrid)):
+    for i in range(len(wgrid)):
+        if wstdflr[i] == stdflrid[p]:
+            for j in range(len(wsectinfo)):
+                if wsect[i] == wsectid[j] and wstdflr[i] in stdflrid:
+                    wsection.append("'" + wsectinfo[j] + "'")
+
 
 
 #柱子信息
@@ -604,6 +701,79 @@ CREATE TABLE CombineBeam
     ShapeValue    TEXT,
     Info          TEXT);''')
 cnY.commit()
+
+
+# wall to sqlite
+tbl4 = []
+for tt in range(12):
+    tbl4.append([])
+for i in range(0, len(wstartx)):
+    tbl4[0].append(wstartx[i])
+    tbl4[1].append(wstarty[i])
+    tbl4[2].append(wstartz[i])
+    tbl4[3].append(wendx[i])
+    tbl4[4].append(wendy[i])
+    tbl4[5].append(wendz[i])
+    tbl4[6].append(wsection[i])
+    tbl4[7].append(0)
+    tbl4[8].append(i + 1)
+    tbl4[9].append("null")
+    tbl4[10].append(wfloor[i])
+    tbl4[11].append(0)
+tbl4_T = list(zip(*tbl4))
+
+# aaa = []
+# tbl11 = []
+# temp2 = []
+# for row in tbl1_T:
+#     aaa.append(row[6])
+# for i in range(len(aaa)):
+#     temp1 = aaa[i]
+#     temp2.append(temp1[1:(temp1.find(","))])
+#
+# for i in range(len(tbl1_T)):
+#     if int(temp2[i]) != 1:
+#         tbl11.append(tbl1_T[i])
+
+
+
+cuY.execute("drop table if exists tbl4;")
+cuY.execute('''
+CREATE TABLE tbl4 
+    (
+    WStartX            REAL,
+    WStartY           REAL,
+    WStartZ           REAL,
+    WEndX           REAL,
+    WEndY           REAL,
+    WEndZ           REAL,
+    WSection           TEXT,
+    Tag                 INTEGER   DEFAULT 0,
+    ID                INTEGER,
+    RvtID             TEXT,
+    BottomFloor            TEXT,
+    WEConn            REAL);''')
+cnY.commit()
+sql_insert = "INSERT INTO tbl4(WStartX,WStartY,WStartZ,WEndX,WEndY,WEndZ,WSection,Tag,ID,RvtID,BottomFloor,WEConn) VALUES"
+sql_values = ""
+sql_values1 = ""
+for i in range(len(tbl4_T)):
+    a = []
+    List = tbl4_T[i]
+    for j in range(len(List)):
+        s = str(List[j])
+        a.append(s)
+    for k in range(0, len(a)):
+        sql_values += a[k]
+        sql_values += ","
+    sql_values1 = "(" + sql_values.strip(',') + ")"
+    sql_todo = sql_insert + sql_values1
+    cuY = cnY.cursor()
+    cuY.execute(sql_todo)
+    sql_values = ""
+    sql_value1 = ""
+cnY.commit()
+
 # sql_insert = "INSERT INTO CombineBeam(id,StartX,StartY,StartZ,EndX,EndY,EndZ,ShapeValue) VALUES(1,1,1,1,1,1,1,1)"
 # cuY.execute(sql_insert)
 # cnY.commit()
