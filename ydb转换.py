@@ -330,7 +330,8 @@ for p in range(len(stdflrid)):
 for i in range(len(wfloor)):
     for j in range(len(stdflrid)):
         if wfloor[i] == stdflrid[j]:
-            wfloor[i] = levelb[j]
+            wfloor[i] = stdflrid[j]
+            wstartz[i]=levelb[j]
 
 
 
@@ -349,6 +350,7 @@ for p in range(len(stdflrid)):
                             wendy.append(bjty[k])
                             wendz.append(jhdiff[k])
 
+wendz=wstartz
 
 #for p in range(len(stdflrid)):
 #    for i in range(len(grid)):
