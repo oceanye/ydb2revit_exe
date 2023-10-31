@@ -345,7 +345,7 @@ for p in range(len(stdflrid)):
             for j in range(len(gridid)):
                 if wgrid[i] == gridid[j]:
                     for k in range(len(jtid)):
-                        if bjt1[j] == jtid[k]:
+                        if bjt2[j] == jtid[k]:
                             wendx.append(bjtx[k])
                             wendy.append(bjty[k])
                             wendz.append(jhdiff[k])
