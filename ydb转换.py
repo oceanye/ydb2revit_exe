@@ -321,17 +321,17 @@ for p in range(len(stdflrid)):
                         if bjt1[j] == jtid[k]:
                             wstartx.append(bjtx[k])
                             wstarty.append(bjty[k])
-                            wstartz.append(jhdiff[k])
+                            wstartz.append(levelb[p])
 
                             wfloor.append(stdflrid[p])
                             w.append(bid[i])
 
+#for j in range(len(stdflrid)):
+    #for i in range(len(wfloor)):
+        #if wfloor[i] == stdflrid[j]:
+            #wfloor[i] = stdflrid[j]
 
-for i in range(len(wfloor)):
-    for j in range(len(stdflrid)):
-        if wfloor[i] == stdflrid[j]:
-            wfloor[i] = stdflrid[j]
-            wstartz[i]=levelb[j]
+            #wstartz.append(levelb[j])
 
 
 
@@ -348,7 +348,7 @@ for p in range(len(stdflrid)):
                         if bjt2[j] == jtid[k]:
                             wendx.append(bjtx[k])
                             wendy.append(bjty[k])
-                            wendz.append(jhdiff[k])
+                            #wendz.append(jhdiff[k])
 
 wendz=wstartz
 
