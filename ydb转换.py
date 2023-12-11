@@ -298,10 +298,14 @@ cnR.commit()
 wsectid=[]
 wsectinfo=[]
 c = cnR.cursor()
-cursor12 = c.execute("SELECT ID,B,H,T2,Dis from tblWallSect")
+cursor12 = c.execute("SELECT ID,B,H,T2,Dis,Kind from tblWallSect")
 for row in cursor12:
     wsectid.append(row[0])
-    wsectinfo.append(str(row[1])+"@"+str(row[2])+"@"+str(row[3])+"@"+str(row[4]))
+    if (row[5] ==1):
+        wsectinfo.append(str(row[1]))
+    else:
+        wsectinfo.append(str(row[1])+"@"+str(row[2]))
+        #wsectinfo.append(str(row[1])+"@"+str(row[2])+"@"+str(row[3])+"@"+str(row[4]))
 cnR.commit()
 
 
