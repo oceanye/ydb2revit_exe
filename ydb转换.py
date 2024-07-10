@@ -83,6 +83,7 @@ print(s)
 
 cnR = sqlite3.connect(s)
 
+
 print("Opened database successfully")
 
 c = cnR.cursor()
