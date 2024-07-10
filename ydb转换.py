@@ -53,12 +53,14 @@ bendy = []
 bendz = []
 bsectid = []
 bsectinfo = []
+bsectdetail = []
 bsection = []
 cstdflr = []
 cjt = []
 csect = []
 csectid = []
 csectinfo = []
+csectdetail=[]
 cstartx = []
 cstarty = []
 cstartz = []
@@ -124,10 +126,11 @@ for row in cursor4:
 cnR.commit()
 
 c = cnR.cursor()
-cursor5 = c.execute("SELECT ID,ShapeVal from tblBeamSect")
+cursor5 = c.execute("SELECT ID,ShapeVal,b,h,u,t,d,f from tblBeamSect")
 for row in cursor5:
     bsectid.append(row[0])
     bsectinfo.append(row[1])
+    bsectdetail.append(str(row[2])+','+str(row[3])+','+str(row[4])+','+str(row[5])+','+str(row[6])+','+str(row[7]))
 cnR.commit()
 
 c = cnR.cursor()
@@ -143,10 +146,11 @@ for row in cursor6:
 cnR.commit()
 
 c = cnR.cursor()
-cursor7 = c.execute("SELECT ID,ShapeVal from tblColSect")
+cursor7 = c.execute("SELECT ID,ShapeVal,b,h,u,t,d,f from tblColSect")
 for row in cursor7:
     csectid.append(row[0])
     csectinfo.append(row[1])
+    csectdetail.append(str(row[2]) + ',' + str(row[3]) + ',' + str(row[4]) + ',' + str(row[5]) + ',' + str(row[6]) + ',' + str(row[7]))
 cnR.commit()
 
 conn = cnR.cursor()
@@ -164,6 +168,7 @@ cnR.commit()
 brjt1=[]
 brjt2=[]
 brsect=[]
+brsectdetail=[]
 brstdflr=[]
 brid=[]
 brhd1=[]
@@ -183,10 +188,11 @@ cnR.commit()
 brsectid=[]
 brsectinfo=[]
 c = cnR.cursor()
-cursor10 = c.execute("SELECT ID,ShapeVal from tblBraceSect")
+cursor10 = c.execute("SELECT ID,ShapeVal,b,h,u,t,d,f from tblBraceSect")
 for row in cursor10:
     brsectid.append(row[0])
     brsectinfo.append(row[1])
+    brsectdetail.append(str(row[2]) + ',' + str(row[3]) + ',' + str(row[4]) + ',' + str(row[5]) + ',' + str(row[6]) + ',' + str(row[7]))
 cnR.commit()
 
 b = []
@@ -230,7 +236,8 @@ for p in range(len(stdflrid)):
         if bstdflr[i] == stdflrid[p]:
             for j in range(len(bsectinfo)):
                 if bsect[i] == bsectid[j] and bstdflr[i] in stdflrid:
-                    bsection.append("'" + bsectinfo[j] + "'")
+                    bsection.append("'" + bsectinfo[j] +"@"+ bsectdetail[j] + "'")
+
 
 #斜撑
 for p in range(len(stdflrid)):
@@ -271,7 +278,7 @@ for p in range(len(stdflrid)):
         if brstdflr[i] == stdflrid[p]:
             for j in range(len(brsectinfo)):
                 if brsect[i] == brsectid[j] and brstdflr[i] in stdflrid:
-                    bsection.append("'" + brsectinfo[j] + "'")
+                    bsection.append("'" + brsectinfo[j] +"@"+brsectdetail[j]+ "'")
 
 
 
@@ -409,7 +416,7 @@ for p in range(len(stdflrid)):
         if cstdflr[i] == stdflrid[p]:
             for j in range(len(csectid)):
                 if csect[i] == csectid[j] and cstdflr[i] in stdflrid:
-                    csection.append("'" + csectinfo[j] + "'")
+                    csection.append("'" + csectinfo[j] +"@"+csectdetail[j]+ "'")
 
 # 判断梁的点铰接
 spbinfo = []
@@ -483,6 +490,8 @@ else:
 
 cnY = sqlite3.connect(db_file_path)
 # print("Opened database successfully")
+
+
 cuY = cnY.cursor()
 
 
