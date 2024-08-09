@@ -55,6 +55,7 @@ bsectid = []
 bsectinfo = []
 bsectdetail = []
 bsection = []
+bsectdetail_PEC= {}
 cstdflr = []
 cjt = []
 csect = []
@@ -131,6 +132,21 @@ for row in cursor5:
     bsectid.append(row[0])
     bsectinfo.append(row[1])
     bsectdetail.append(str(row[2])+','+str(row[3])+','+str(row[4])+','+str(row[5])+','+str(row[6])+','+str(row[7]))
+cnR.commit()
+
+c=cnR.cursor()
+cursor51 = c.execute("SELECT ID,ShapeVal,b,h,u,t,d,f from tblSubSectionSect")
+
+for row in cursor51:
+    id_value = int(row[0])  # 确保 ID 是字符串
+    shapeVal = str(row[1])
+    if shapeVal == '':
+        shapeVal = "PEC"
+    PEC_dict = {
+        'ShapeValue': shapeVal,
+        'info': str(row[2])+','+str(row[3])+','+str(row[4])+','+str(row[5])+','+str(row[6])+','+str(row[7])
+                }
+    bsectdetail_PEC[id_value]=PEC_dict
 cnR.commit()
 
 c = cnR.cursor()
@@ -236,7 +252,14 @@ for p in range(len(stdflrid)):
         if bstdflr[i] == stdflrid[p]:
             for j in range(len(bsectinfo)):
                 if bsect[i] == bsectid[j] and bstdflr[i] in stdflrid:
-                    bsection.append("'" + bsectinfo[j] +"@"+ bsectdetail[j] + "'")
+                    section_check = (bsectdetail_PEC.get(bsect[i]))
+                    if section_check:
+                        section_shape = section_check.get("ShapeValue")
+                        section_info = section_check.get("info")
+                        print(section_info)
+                    else:
+                        section_info = bsectdetail[j]
+                    bsection.append("'" + bsectinfo[j] +"@"+ section_info + "'")
 
 
 #斜撑
