@@ -590,6 +590,7 @@ for i in range(len(tbl1_T)):
     sql_value1 = ""
 cnY.commit()
 
+
 tbl2 = []
 for tt in range(12):
     tbl2.append([])
