@@ -174,8 +174,22 @@ c = cnR.cursor()
 cursor7 = c.execute("SELECT ID,ShapeVal,b,h,u,t,d,f from tblColSect")
 for row in cursor7:
     csectid.append(row[0])
-    csectinfo.append(row[1])
-    csectdetail.append(str(row[2]) + ',' + str(row[3]) + ',' + str(row[4]) + ',' + str(row[5]) + ',' + str(row[6]) + ',' + str(row[7]))
+
+    if row[1].split(',')[0]=="209":
+
+        # u - 4,t-5,d-6,f-7,d-6,f-7,
+        shape_detail = str(row[4]) + ',' + str(row[5]) + ',' + str(row[6]) + ',' + str(row[7]) + ',' + str(row[6]) + ',' + str(
+                row[7]);
+        csectinfo.append(row[1].split(',')[0]+','+shape_detail+','+row[1].split(',')[1])
+        csectdetail.append(shape_detail)
+    else:
+        csectinfo.append(row[1])
+        csectdetail.append(str(row[2])+','+str(row[3])+','+str(row[4])+','+str(row[5])+','+str(row[6])+','+str(row[7]))
+
+
+
+    #csectinfo.append(row[1])
+    #csectdetail.append(str(row[2]) + ',' + str(row[3]) + ',' + str(row[4]) + ',' + str(row[5]) + ',' + str(row[6]) + ',' + str(row[7]))
 cnR.commit()
 
 conn = cnR.cursor()
