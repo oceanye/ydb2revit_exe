@@ -541,6 +541,48 @@ cnY = sqlite3.connect(db_file_path)
 
 cuY = cnY.cursor()
 
+# ---------------------------------------------------------
+# Copy tblSubSectionSect table logic
+# ---------------------------------------------------------
+try:
+    print("Attempting to copy tblSubSectionSect...")
+    source_cursor = cnR.cursor()
+    dest_cursor = cnY.cursor()
+
+    # Check if table exists in source
+    source_cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tblSubSectionSect'")
+    if source_cursor.fetchone():
+        # Get schema
+        source_cursor.execute("PRAGMA table_info(tblSubSectionSect)")
+        columns = source_cursor.fetchall()
+        
+        if columns:
+            # Build query strings dynamically based on source schema
+            column_defs = ", ".join([f"{col[1]} {col[2]}" for col in columns])
+            column_names = ", ".join([col[1] for col in columns])
+            placeholders = ", ".join(["?"] * len(columns))
+
+            # Create table in destination (Drop if exists to ensure clean copy)
+            dest_cursor.execute("DROP TABLE IF EXISTS tblSubSectionSect")
+            dest_cursor.execute(f"CREATE TABLE tblSubSectionSect ({column_defs})")
+
+            # Fetch and insert data
+            source_cursor.execute("SELECT * FROM tblSubSectionSect")
+            rows = source_cursor.fetchall()
+            if rows:
+                dest_cursor.executemany(f"INSERT INTO tblSubSectionSect ({column_names}) VALUES ({placeholders})", rows)
+            
+            cnY.commit()
+            print(f"Successfully copied tblSubSectionSect with {len(rows)} rows.")
+        else:
+            print("tblSubSectionSect exists but has no columns defined.")
+    else:
+        print("tblSubSectionSect does not exist in the source file. Skipping copy.")
+
+except Exception as e:
+    print(f"An error occurred while copying tblSubSectionSect: {e}")
+# ---------------------------------------------------------
+
 
 
 tbl1 = []
