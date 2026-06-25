@@ -90,7 +90,17 @@ cnR = sqlite3.connect(s)
 print("Opened database successfully")
 
 c = cnR.cursor()
-cursor1 = c.execute("SELECT GridID,SectID,StdFlrID,ID,HDiff1,HDiff2 from tblBeamSeg")
+# tblBeamSeg 的列在不同 YJK 版本/模型间不固定：部分模型含独立的 Ecc2（终点端偏心），
+# 部分（如本仓库墙施工图样例）只有 Ecc。按 handoff 约定 Ecc==Ecc2 恒成立，缺 Ecc2 时回退用 Ecc，
+# 保证 exe 对两类模型都不崩；tbl1 输出仍恒含 Ecc/Ecc2/BRotation 三列（接口契约不变）。
+c.execute("PRAGMA table_info(tblBeamSeg)")
+_beamseg_cols = [r[1] for r in c.fetchall()]
+_ecc2_expr = "Ecc2" if "Ecc2" in _beamseg_cols else "Ecc"
+becc_raw = []
+becc2_raw = []
+brot_raw = []
+cursor1 = c.execute(
+    "SELECT GridID,SectID,StdFlrID,ID,HDiff1,HDiff2,Ecc," + _ecc2_expr + " AS Ecc2,Rotation from tblBeamSeg")
 for row in cursor1:
     grid.append(row[0])
     bsect.append(row[1])
@@ -98,6 +108,9 @@ for row in cursor1:
     bid.append(row[3])
     hd1.append(row[4])
     hd2.append(row[5])
+    becc_raw.append(row[6])   # 新增：梁偏心（mm，带符号，起点端）
+    becc2_raw.append(row[7])  # 新增：梁偏心（mm，带符号，终点端；缺列时=Ecc）
+    brot_raw.append(row[8])   # 新增：梁转角（度）
 cnR.commit()
 
 c = cnR.cursor()
@@ -236,6 +249,10 @@ cnR.commit()
 
 b = []
 bstartz2 = []
+# 梁偏心/转角与 b[]/bstartx 同序构建（斜撑段补 0），避免依赖梁/斜撑 ID 不重叠的隐含假设
+becc = []
+becc2 = []
+brot = []
 for p in range(len(stdflrid)):
     for i in range(len(grid)):
         if bstdflr[i] == stdflrid[p]:
@@ -247,6 +264,9 @@ for p in range(len(stdflrid)):
                             bstarty.append(bjty[k])
                             bstartz2.append(jhdiff[k])
                             b.append(bid[i])
+                            becc.append(becc_raw[i] if becc_raw[i] is not None else 0)
+                            becc2.append(becc2_raw[i] if becc2_raw[i] is not None else 0)
+                            brot.append(brot_raw[i] if brot_raw[i] is not None else 0)
 
 bendz2 = []
 for p in range(len(stdflrid)):
@@ -295,6 +315,9 @@ for p in range(len(stdflrid)):
                     bstarty.append(bjty[k])
                     bstartz2.append(jhdiff[k])
                     b.append(brid[i])
+                    becc.append(0)    # 斜撑无梁偏心
+                    becc2.append(0)
+                    brot.append(0)
 
 
 for p in range(len(stdflrid)):
@@ -586,7 +609,7 @@ except Exception as e:
 
 
 tbl1 = []
-for tt in range(12):
+for tt in range(15):
     tbl1.append([])
 for i in range(0, len(bstartx)):
     tbl1[0].append(bstartx[i])
@@ -601,6 +624,9 @@ for i in range(0, len(bstartx)):
     tbl1[9].append("null")
     tbl1[10].append(bsconn[i])
     tbl1[11].append(beconn[i])
+    tbl1[12].append(becc[i])    # 新增：Ecc（mm，带符号，起点端）
+    tbl1[13].append(becc2[i])   # 新增：Ecc2（mm，带符号，终点端）
+    tbl1[14].append(brot[i])    # 新增：BRotation（度）
 tbl1_T = list(zip(*tbl1))
 
 # aaa = []
@@ -633,9 +659,12 @@ CREATE TABLE tbl1
     ID                INTEGER,
     RvtID             TEXT,
     BSConn            REAL,
-    BEConn            REAL);''')
+    BEConn            REAL,
+    Ecc               REAL,
+    Ecc2              REAL,
+    BRotation         REAL);''')
 cnY.commit()
-sql_insert = "INSERT INTO tbl1(BStartX,BStartY,BStartZ,BEndX,BEndY,BEndZ,BSection,Tag,ID,RvtID,BSConn,BEConn) VALUES"
+sql_insert = "INSERT INTO tbl1(BStartX,BStartY,BStartZ,BEndX,BEndY,BEndZ,BSection,Tag,ID,RvtID,BSConn,BEConn,Ecc,Ecc2,BRotation) VALUES"
 sql_values = ""
 sql_values1 = ""
 for i in range(len(tbl1_T)):
@@ -806,7 +835,8 @@ CREATE TABLE CombineBeam
     EndY        TEXT, 
     EndZ         TEXT,
     ShapeValue    TEXT,
-    Info          TEXT);''')
+    Info          TEXT,
+    Ecc           TEXT);''')
 cnY.commit()
 
 
