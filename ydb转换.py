@@ -4,12 +4,13 @@
 The first columns of tbl1/tbl2/tbl3/tbl4 are a compatibility contract with the
 existing Revit add-in. PEC data is deliberately compact:
 
-* PEC beam/column H sections use ``H{h}x{b}x{tw}x{tf}@PEC``.
+* True PEC beam/column H sections use ``H{h}x{b}x{tw}x{tf}@PEC``.
 * Every straight wall leg is one tbl4 row.
 * A logical L wall is represented by two rows sharing WGroupID and carrying
   ``-L1`` / ``-L2`` leg identifiers.
-* Steel/rebar/plate data inside a PEC wall is retained as JSON in WInfo; the
-  converter does not turn it into extra physical elements.
+* Steel/rebar/plate data inside a PEC wall, including ordinary H profiles at
+  wall endpoints, is retained as JSON in WInfo; the converter does not turn it
+  into extra physical elements or tbl2 columns.
 """
 
 import argparse
@@ -407,7 +408,7 @@ def convert_ydb(source_path, destination_path):
     brace_segments_by_floor = _group_by(brace_segments, "StdFlrID")
     wall_segments_by_floor = _group_by(wall_segments, "StdFlrID")
 
-    pec_wall_nodes = set()
+    pec_wall_boundary_nodes = set()
     for segment in wall_segments:
         section = wall_sections.get(_value(segment, "SectID"))
         if _section_kind(section) not in PEC_WALL_KINDS:
@@ -415,8 +416,8 @@ def convert_ydb(source_path, destination_path):
         standard_floor_id = _value(segment, "StdFlrID")
         grid = grid_for(standard_floor_id, _value(segment, "GridID"))
         if grid is not None:
-            pec_wall_nodes.add((standard_floor_id, _value(grid, "Jt1ID")))
-            pec_wall_nodes.add((standard_floor_id, _value(grid, "Jt2ID")))
+            pec_wall_boundary_nodes.add((standard_floor_id, _value(grid, "Jt1ID")))
+            pec_wall_boundary_nodes.add((standard_floor_id, _value(grid, "Jt2ID")))
 
     tbl1_rows = []
     for floor in floors:
@@ -478,12 +479,17 @@ def convert_ydb(source_path, destination_path):
                 continue
             section = column_sections.get(_value(segment, "SectID"))
             kind = _section_kind(section)
-            is_pec_h = kind == 209 or (
-                kind == 2 and (standard_floor_id, _value(segment, "JtID")) in pec_wall_nodes
-            )
+            node_key = (standard_floor_id, _value(segment, "JtID"))
+            # YJK stores the ordinary Kind-2 H profiles at PEC wall endpoints
+            # in the column tables.  They are boundary steel belonging to the
+            # wall, not independent PEC columns.  Keep them available for
+            # WInfo.boundary_h below, but exclude them from tbl2 so Revit does
+            # not create duplicate column geometry.
+            if kind == 2 and node_key in pec_wall_boundary_nodes:
+                continue
             section_text = (
                 _h_section_name(section, subsections.get(_value(segment, "SectID")), pec=True)
-                if is_pec_h else _legacy_section_text(section)
+                if kind == 209 else _legacy_section_text(section)
             )
             tbl2_rows.append((
                 _value(joint, "X"), _value(joint, "Y"), bottom_z,

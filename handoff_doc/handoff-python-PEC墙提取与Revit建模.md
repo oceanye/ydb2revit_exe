@@ -11,7 +11,8 @@ Python 实现：`ydb转换.py`
 3. 墙保持“一条直墙段对应 `tbl4` 一行”。
 4. I 墙由一个直段组成；L 墙由两个直段组成，两行共享逻辑墙编号。
 5. Revit 只建立混凝土墙外轮廓。墙内 H 型钢、连接板和钢筋不建立实体，仅在 `WInfo` 中保留参数。
-6. 独立存在于 `tbl2` 的边缘柱仍作为柱建模；它与“墙内 H 型钢信息”不是同一套几何，禁止重复创建。
+6. YDB 柱表中位于 PEC 墙端点的普通 Kind 2 H 型钢是墙的配套端柱：只写入对应墙的 `WInfo.boundary_h`，不进入 `tbl2`，也不标记为 PEC 柱。
+7. 除上述墙端 Kind 2 配套型钢外，独立柱仍进入 `tbl2`；真实 PEC 柱必须由自身截面定义识别，不能仅因靠近 PEC 墙而推断。
 
 所有坐标和截面尺寸均为 mm，角度为度。Revit API 负责把 mm 转换为内部英尺。
 
@@ -44,13 +45,15 @@ H400x200x8x16@PEC
 当前样例实际结果：
 
 - 梁：`H400x150x10x20@PEC`
-- 边缘柱：`H244x175x8x12@PEC`
+- 独立 PEC 柱：无
+- 墙端配套型钢：`H244x175x8x12`，只保留在各墙行的 `WInfo.boundary_h`
 
 数据来源：
 
 - `tblBeamSect.Kind=209`：按 `t=H、d=W、u=tw、f=tf` 读取；字段缺失时回退到同 ID 的 `tblSubSectionSect`。
-- `tblColSect.Kind=2`：按 `h=H、u=W、b=tw、t=tf` 读取。
-- 只有处于已识别 PEC 墙端点的 Kind 2 柱才追加 `@PEC`；普通模型中的普通 H 型钢柱保持原格式。
+- `tblColSect.Kind=209`：仅当它作为独立柱存在时，按相同规则输出为 `H...@PEC`。
+- 位于 PEC 墙端点的 `tblColSect.Kind=2`：按 `h=H、u=W、b=tw、t=tf` 解析后写入墙的 `boundary_h`，并从 `tbl2` 排除；不得追加 `@PEC`。
+- 不在 PEC 墙端点的普通柱保持原有 `tbl2` 输出格式。
 
 Revit 端处理要求：
 
@@ -166,6 +169,7 @@ Revit 端处理要求：
 - `section_parameters` 保留 `tblWallSect` 的全部业务参数，包括当前尚不能统一解释的 `H/T2/Dis/Dis1` 和端部截面文本。
 - `segment_parameters` 保留偏心、端部高差、斜墙、端部偏移、墙铰等布置参数。
 - `boundary_h` 保存墙端点附近 H 型柱的尺寸、偏心和旋转，仅供查询和深化，不据此重复建柱。
+- L 墙的公共角点同时属于 L1、L2；同一端部型钢信息可出现在两行的 `boundary_h.start` 中。这只是墙肢对端部信息的共同引用，不代表两个柱构件。
 - `modeling` 中的 false 表示本阶段不得创建对应实体，不表示源数据中不存在该信息。
 - 不输出 `YdbWallID/YdbSectID/YdbJtID/YdbFloorID`。
 
@@ -202,9 +206,9 @@ ORDER BY ID;
 - 墙内 H 型钢实体；
 - 连接板实体；
 - 逐根钢筋；
-- 由 `boundary_h` 重复生成的边缘柱。
+- 由 `boundary_h` 生成的墙端配套型钢柱。
 
-只有 `tbl2` 中真实存在的边缘柱才按柱流程创建。
+只有 `tbl2` 中真实存在的独立柱才按柱流程创建；不得再从墙端节点或 `boundary_h` 推导 Column。
 
 ### 7.4 偏心和其他原始参数
 
@@ -215,13 +219,14 @@ ORDER BY ID;
 本地 `dtlmodel_PECWall.ydb` 转换结果：
 
 - `tbl1`：1 行，`H400x150x10x20@PEC`。
-- `tbl2`：4 行，均为 `H244x175x8x12@PEC`。
+- `tbl2`：0 行；当前样例没有独立 PEC 柱。
 - `tbl3`：`1F=0`、`RF=3300`。
 - `tbl4`：3 行。
 - 逻辑 PEC 墙：2 组。
   - `PECW0001-L1` + `PECW0001-L2`：L 墙。
   - `PECW0002-L1`：I 墙。
 - L1/L2 的输出起点均为公共角点 `(0,1500)`。
+- YDB 柱表中的 4 条 `H244x175x8x12` 墙端配套型钢记录均未进入 `tbl2`，其参数随对应墙行保存在 `WInfo.boundary_h`。
 - 普通墙样例 `dtlmodelsw.ydb`、`dtlmodelww.ydb` 均可正常转换，且不会产生 PEC 分组字段。
 
 ## 9. 后续 C# 最小改动清单

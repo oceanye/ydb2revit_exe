@@ -134,13 +134,13 @@ class PecConversionTests(unittest.TestCase):
             columns[12:],
         )
 
-    def test_pec_beam_and_columns_use_h_suffix(self):
+    def test_pec_beam_uses_suffix_and_wall_boundary_h_is_not_a_column(self):
         with closing(sqlite3.connect(self.pec_output)) as connection:
             beam_sections = [row[0] for row in connection.execute("SELECT BSection FROM tbl1")]
             column_sections = [row[0] for row in connection.execute("SELECT CSection FROM tbl2")]
             column_columns = [row[1] for row in connection.execute("PRAGMA table_info(tbl2)")]
         self.assertEqual(["H400x150x10x20@PEC"], beam_sections)
-        self.assertEqual(["H244x175x8x12@PEC"] * 4, column_sections)
+        self.assertEqual([], column_sections)
         self.assertFalse(any(name.startswith("Ydb") for name in column_columns))
 
     def test_l_and_i_wall_groups_are_traceable(self):
@@ -173,6 +173,35 @@ class PecConversionTests(unittest.TestCase):
         self.assertEqual(150.0, infos[1]["section_parameters"]["Dis1"])
         self.assertEqual("H244x175x8x12", infos[0]["boundary_h"]["start"][0]["section"])
         self.assertFalse(infos[0]["modeling"]["create_wall_internal_h"])
+
+    def test_true_standalone_pec_column_still_uses_h_suffix(self):
+        source = Path(self.temp_dir.name) / "standalone_pec_column.ydb"
+        output = Path(self.temp_dir.name) / "standalone_pec_column.db"
+        with closing(sqlite3.connect(self.pec_source)) as original, closing(
+            sqlite3.connect(source)
+        ) as connection:
+            original.backup(connection)
+            connection.execute(
+                "INSERT INTO tblJoint VALUES (6,6,10,3000,3000,0)"
+            )
+            connection.execute(
+                "INSERT INTO tblColSect VALUES "
+                "(302,2,0,209,'209,302,',0,0,8,400,200,16)"
+            )
+            connection.execute(
+                "INSERT INTO tblSubSectionSect VALUES "
+                "(302,12,2,13,'',200,400,8,400,200,16)"
+            )
+            connection.execute(
+                "INSERT INTO tblColSeg VALUES (315,5,10,302,6,0,0,0)"
+            )
+            connection.commit()
+        CONVERTER.convert_ydb(source, output)
+        with closing(sqlite3.connect(output)) as connection:
+            sections = [row[0] for row in connection.execute(
+                "SELECT CSection FROM tbl2 ORDER BY ID"
+            )]
+        self.assertEqual(["H400x200x8x16@PEC"], sections)
 
     def test_legacy_wall_sample_without_dis1_still_converts(self):
         with closing(sqlite3.connect(self.normal_output)) as connection:
