@@ -1,916 +1,793 @@
-# This is a sample Python script.
-# coding:utf-8
+# coding: utf-8
+"""YJK ydb -> Revit handoff SQLite converter.
 
-#import tinker
-# Press Shift+F10 to execute it or replace it with your code.
-# Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
-import os
+The first columns of tbl1/tbl2/tbl3/tbl4 are a compatibility contract with the
+existing Revit add-in. PEC data is deliberately compact:
 
+* PEC beam/column H sections use ``H{h}x{b}x{tw}x{tf}@PEC``.
+* Every straight wall leg is one tbl4 row.
+* A logical L wall is represented by two rows sharing WGroupID and carrying
+  ``-L1`` / ``-L2`` leg identifiers.
+* Steel/rebar/plate data inside a PEC wall is retained as JSON in WInfo; the
+  converter does not turn it into extra physical elements.
+"""
 
-def print_hi(name):
-    # Use a breakpoint in the code line below to debug your script.
-    print(f'Hi, {name}')  # Press Ctrl+F8 to toggle the breakpoint.
-
-
-# Press the green button in the gutter to run the script.
-
-
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+import argparse
+import json
+import math
 import sqlite3
-import tkinter as tk
-from tkinter import filedialog
-
-if __name__ == '__main__':
-    print_hi('PyCharm')
+from pathlib import Path
 
 
-
-root = tk.Tk()
-root.withdraw()
-
-#Folderpath = filedialog.askdirectory()
-Filepath=filedialog.askopenfilenames()
+PEC_WALL_KINDS = {211, 212}
+PEC_MAIN_WALL_KIND = 211
+PEC_SECONDARY_WALL_KIND = 212
+WINFO_VERSION = 1
 
 
-grid = []
-bsect = []
-bstdflr = []
-gridid = []
-bjt1 = []
-bjt2 = []
-jtid = []
-bjtx = []
-bjty = []
-bstartx = []
-bstarty = []
-stdflrid = []
-levelb1 = []
-levelb = []
-height = []
-bstartz = []
-bendx = []
-bendy = []
-bendz = []
-bsectid = []
-bsectinfo = []
-bsectdetail = []
-bsection = []
-bsectdetail_PEC= {}
-cstdflr = []
-cjt = []
-csect = []
-csectid = []
-csectinfo = []
-csectdetail=[]
-cstartx = []
-cstarty = []
-cstartz = []
-cendz = []
-csection = []
-spbid = []
-spbshape = []
-spbname = []
-bid = []
-cid = []
-hd1 = []
-hd2 = []
-ceccx=[]
-ceccy=[]
-crot=[]
+def _decode_sqlite_text(raw):
+    """Decode YDB text from either UTF-8 or common Chinese legacy encodings."""
+    for encoding in ("utf-8", "gb18030", "gbk"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            pass
+    return raw.decode("utf-8", "replace")
 
 
-
-s = list(Filepath)
-s="".join(tuple(s))
-print(s)
-
-cnR = sqlite3.connect(s)
+def _quote_identifier(name):
+    return '"' + str(name).replace('"', '""') + '"'
 
 
-print("Opened database successfully")
+def _table_exists(connection, table_name):
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone() is not None
 
-c = cnR.cursor()
-# tblBeamSeg 的列在不同 YJK 版本/模型间不固定：部分模型含独立的 Ecc2（终点端偏心），
-# 部分（如本仓库墙施工图样例）只有 Ecc。按 handoff 约定 Ecc==Ecc2 恒成立，缺 Ecc2 时回退用 Ecc，
-# 保证 exe 对两类模型都不崩；tbl1 输出仍恒含 Ecc/Ecc2/BRotation 三列（接口契约不变）。
-c.execute("PRAGMA table_info(tblBeamSeg)")
-_beamseg_cols = [r[1] for r in c.fetchall()]
-_ecc2_expr = "Ecc2" if "Ecc2" in _beamseg_cols else "Ecc"
-becc_raw = []
-becc2_raw = []
-brot_raw = []
-cursor1 = c.execute(
-    "SELECT GridID,SectID,StdFlrID,ID,HDiff1,HDiff2,Ecc," + _ecc2_expr + " AS Ecc2,Rotation from tblBeamSeg")
-for row in cursor1:
-    grid.append(row[0])
-    bsect.append(row[1])
-    bstdflr.append(row[2])
-    bid.append(row[3])
-    hd1.append(row[4])
-    hd2.append(row[5])
-    becc_raw.append(row[6])   # 新增：梁偏心（mm，带符号，起点端）
-    becc2_raw.append(row[7])  # 新增：梁偏心（mm，带符号，终点端；缺列时=Ecc）
-    brot_raw.append(row[8])   # 新增：梁转角（度）
-cnR.commit()
 
-c = cnR.cursor()
-cursor2 = c.execute("SELECT ID,Jt1ID,Jt2ID from tblGrid")
-for row in cursor2:
-    gridid.append(row[0])
-    bjt1.append(row[1])
-    bjt2.append(row[2])
-cnR.commit()
+def _table_columns(connection, table_name):
+    if not _table_exists(connection, table_name):
+        return []
+    return [row[1] for row in connection.execute(
+        "PRAGMA table_info(" + _quote_identifier(table_name) + ")"
+    )]
 
-jhdiff = []
-c = cnR.cursor()
-cursor3 = c.execute("SELECT ID,X,Y,HDiff from tblJoint")
-for row in cursor3:
-    jtid.append(row[0])
-    bjtx.append(row[1])
-    bjty.append(row[2])
-    jhdiff.append(row[3])
-cnR.commit()
 
-c = cnR.cursor()
-cursor4 = c.execute("SELECT StdFlrID,LevelB,Height from tblFloor")
-for row in cursor4:
-    stdflrid.append(row[0])
-    levelb.append(row[1])
-    height.append(row[2])
-cnR.commit()
+def _ordered_rows(connection, table_name):
+    if not _table_exists(connection, table_name):
+        return []
+    columns = _table_columns(connection, table_name)
+    order_columns = [name for name in ("No_", "ID") if name in columns]
+    sql = "SELECT * FROM " + _quote_identifier(table_name)
+    if order_columns:
+        sql += " ORDER BY " + ", ".join(_quote_identifier(name) for name in order_columns)
+    return list(connection.execute(sql))
 
-c = cnR.cursor()
-cursor5 = c.execute("SELECT ID,ShapeVal,b,h,u,t,d,f from tblBeamSect")
-for row in cursor5:
-    bsectid.append(row[0])
 
-    if row[1].split(',')[0]=="209":
+def _value(row, name, default=None):
+    if row is None:
+        return default
+    try:
+        if name in row.keys():
+            value = row[name]
+            return default if value is None else value
+    except AttributeError:
+        pass
+    return default
 
-        # u - 4,t-5,d-6,f-7,d-6,f-7,
-        shape_detail = str(row[4]) + ',' + str(row[5]) + ',' + str(row[6]) + ',' + str(row[7]) + ',' + str(row[6]) + ',' + str(
-                row[7]);
-        bsectinfo.append(row[1].split(',')[0]+','+shape_detail+','+row[1].split(',')[1])
-        bsectdetail.append(shape_detail)
+
+def _as_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _format_number(value):
+    if value is None or value == "":
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if math.isfinite(number) and number.is_integer():
+        return str(int(number))
+    return format(number, ".12g")
+
+
+def _first_positive(*values):
+    for value in values:
+        number = _as_float(value, 0.0)
+        if number > 0:
+            return number
+    return None
+
+
+def _section_kind(section):
+    return _as_int(_value(section, "Kind"), 0)
+
+
+def _legacy_section_text(section):
+    """Preserve the pre-existing ShapeVal@detail representation."""
+    if section is None:
+        return ""
+    shape_value = str(_value(section, "ShapeVal", "") or "")
+    detail_names = ("b", "h", "u", "t", "d", "f")
+    present = [name for name in detail_names if name in section.keys()]
+    if not present:
+        return shape_value
+    details = ",".join(_format_number(_value(section, name, 0)) for name in detail_names)
+    return shape_value + "@" + details
+
+
+def _h_dimensions(section, subsection=None):
+    """Return conventional (height, flange width, web, flange) dimensions."""
+    if section is None:
+        return None
+    kind = _section_kind(section)
+    if kind == 209:
+        # YJK PEC beam/column: u=tw, t=H, d=W, f=tf.  The same values may
+        # also be repeated in tblSubSectionSect.
+        height = _first_positive(_value(section, "t"), _value(subsection, "t"), _value(subsection, "h"))
+        width = _first_positive(_value(section, "d"), _value(subsection, "d"), _value(subsection, "b"))
+        web = _first_positive(_value(section, "u"), _value(subsection, "u"))
+        flange = _first_positive(_value(section, "f"), _value(subsection, "f"))
+    elif kind == 2:
+        # Existing symmetric H/I section: b=tw, h=H, u/d=W, t/f=tf.
+        height = _first_positive(_value(section, "h"))
+        width = _first_positive(_value(section, "u"), _value(section, "d"))
+        web = _first_positive(_value(section, "b"))
+        flange = _first_positive(_value(section, "t"), _value(section, "f"))
     else:
-        bsectinfo.append(row[1])
-        bsectdetail.append(str(row[2])+','+str(row[3])+','+str(row[4])+','+str(row[5])+','+str(row[6])+','+str(row[7]))
-cnR.commit()
+        return None
+    if None in (height, width, web, flange):
+        return None
+    return height, width, web, flange
 
-c=cnR.cursor()
-cursor51 = c.execute("SELECT ID,ShapeVal,b,h,u,t,d,f from tblSubSectionSect")
 
-for row in cursor51:
-    id_value = int(row[0])  # 确保 ID 是字符串
-    shapeVal = str(row[1])
-    if shapeVal == '':
-        shapeVal = "PEC"
-    PEC_dict = {
-        'ShapeValue': shapeVal,
-        'info': str(row[2])+','+str(row[3])+','+str(row[4])+','+str(row[5])+','+str(row[6])+','+str(row[7])
-                }
-    bsectdetail_PEC[id_value]=PEC_dict
-cnR.commit()
-
-c = cnR.cursor()
-cursor6 = c.execute("SELECT StdFlrID,SectID,JtID,ID,EccX,EccY,Rotation from tblColSeg")
-for row in cursor6:
-    cstdflr.append(row[0])
-    csect.append(row[1])
-    cjt.append(row[2])
-    cid.append(row[3])
-    ceccx.append(row[4])
-    ceccy.append(row[5])
-    crot.append(row[6])
-cnR.commit()
-
-c = cnR.cursor()
-cursor7 = c.execute("SELECT ID,ShapeVal,b,h,u,t,d,f from tblColSect")
-for row in cursor7:
-    csectid.append(row[0])
-
-    if row[1].split(',')[0]=="209":
-
-        # u - 4,t-5,d-6,f-7,d-6,f-7,
-        shape_detail = str(row[4]) + ',' + str(row[5]) + ',' + str(row[6]) + ',' + str(row[7]) + ',' + str(row[6]) + ',' + str(
-                row[7]);
-        csectinfo.append(row[1].split(',')[0]+','+shape_detail+','+row[1].split(',')[1])
-        csectdetail.append(shape_detail)
+def _h_section_name(section, subsection=None, pec=False):
+    dimensions = _h_dimensions(section, subsection)
+    if dimensions is None:
+        raw = str(_value(section, "ShapeVal", "") or "").rstrip(",")
+        base = raw or "H"
     else:
-        csectinfo.append(row[1])
-        csectdetail.append(str(row[2])+','+str(row[3])+','+str(row[4])+','+str(row[5])+','+str(row[6])+','+str(row[7]))
+        base = "H" + "x".join(_format_number(value) for value in dimensions)
+    if pec and not base.upper().endswith("@PEC"):
+        base += "@PEC"
+    return base
 
 
-
-    #csectinfo.append(row[1])
-    #csectdetail.append(str(row[2]) + ',' + str(row[3]) + ',' + str(row[4]) + ',' + str(row[5]) + ',' + str(row[6]) + ',' + str(row[7]))
-cnR.commit()
-
-conn = cnR.cursor()
-
-# cnR.text_factory = bytes
-cnR.text_factory = lambda x: str(x, 'gbk', 'ignore')
-
-cursor8 = c.execute("SELECT ID,ShapeVal,Name from tblProperty")
-for row in cursor8:
-    spbid.append(row[0])
-    spbshape.append(row[1])
-    spbname.append(row[2])
-cnR.commit()
-
-brjt1=[]
-brjt2=[]
-brsect=[]
-brsectdetail=[]
-brstdflr=[]
-brid=[]
-brhd1=[]
-brhd2=[]
-c = cnR.cursor()
-cursor9 = c.execute("SELECT Jt1ID,Jt2ID,SectID,StdFlrID,ID,HDiff1,HDiff2 from tblBraceSeg")
-for row in cursor9:
-    brjt1.append(row[0])
-    brjt2.append(row[1])
-    brsect.append(row[2])
-    brstdflr.append(row[3])
-    brid.append(row[4])
-    brhd1.append(row[5])
-    brhd2.append(row[6])
-cnR.commit()
-
-brsectid=[]
-brsectinfo=[]
-c = cnR.cursor()
-cursor10 = c.execute("SELECT ID,ShapeVal,b,h,u,t,d,f from tblBraceSect")
-for row in cursor10:
-    brsectid.append(row[0])
-    brsectinfo.append(row[1])
-    brsectdetail.append(str(row[2]) + ',' + str(row[3]) + ',' + str(row[4]) + ',' + str(row[5]) + ',' + str(row[6]) + ',' + str(row[7]))
-cnR.commit()
-
-b = []
-bstartz2 = []
-# 梁偏心/转角与 b[]/bstartx 同序构建（斜撑段补 0），避免依赖梁/斜撑 ID 不重叠的隐含假设
-becc = []
-becc2 = []
-brot = []
-for p in range(len(stdflrid)):
-    for i in range(len(grid)):
-        if bstdflr[i] == stdflrid[p]:
-            for j in range(len(gridid)):
-                if grid[i] == gridid[j]:
-                    for k in range(len(jtid)):
-                        if bjt1[j] == jtid[k]:
-                            bstartx.append(bjtx[k])
-                            bstarty.append(bjty[k])
-                            bstartz2.append(jhdiff[k])
-                            b.append(bid[i])
-                            becc.append(becc_raw[i] if becc_raw[i] is not None else 0)
-                            becc2.append(becc2_raw[i] if becc2_raw[i] is not None else 0)
-                            brot.append(brot_raw[i] if brot_raw[i] is not None else 0)
-
-bendz2 = []
-for p in range(len(stdflrid)):
-    for i in range(len(grid)):
-        if bstdflr[i] == stdflrid[p]:
-            for j in range(len(gridid)):
-                if grid[i] == gridid[j]:
-                    for k in range(len(jtid)):
-                        if bjt2[j] == jtid[k]:
-                            bendx.append(bjtx[k])
-                            bendy.append(bjty[k])
-                            bendz2.append(jhdiff[k])
-
-for p in range(len(stdflrid)):
-    for i in range(len(grid)):
-        if bstdflr[i] == stdflrid[p]:
-            bstartz.append(levelb[p] + height[p])
-            bendz.append(levelb[p] + height[p])
-
-# for i in range(len(bstartz)):
-#     bstartz[i] = bstartz[i] + bstartz2[i]
-#     bendz[i] = bendz[i] + bendz2[i]
-
-for p in range(len(stdflrid)):
-    for i in range(len(grid)):
-        if bstdflr[i] == stdflrid[p]:
-            for j in range(len(bsectinfo)):
-                if bsect[i] == bsectid[j] and bstdflr[i] in stdflrid:
-                    section_check = (bsectdetail_PEC.get(bsect[i]))
-                    if section_check:
-                        section_shape = section_check.get("ShapeValue")
-                        section_info = section_check.get("info")
-                        print(section_info)
-                    else:
-                        section_info = bsectdetail[j]
-                    bsection.append("'" + bsectinfo[j] +"@"+ section_info + "'")
+def _group_by(rows, column):
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(_value(row, column), []).append(row)
+    return grouped
 
 
-#斜撑
-for p in range(len(stdflrid)):
-    for i in range(len(brstdflr)):
-        if brstdflr[i] == stdflrid[p]:
-            for k in range(len(jtid)):
-                if brjt1[i] == jtid[k]:
-                    bstartx.append(bjtx[k])
-                    bstarty.append(bjty[k])
-                    bstartz2.append(jhdiff[k])
-                    b.append(brid[i])
-                    becc.append(0)    # 斜撑无梁偏心
-                    becc2.append(0)
-                    brot.append(0)
+def _row_map(rows, column="ID"):
+    return {_value(row, column): row for row in rows}
 
 
-for p in range(len(stdflrid)):
-    for i in range(len(brstdflr)):
-        if brstdflr[i] == stdflrid[p]:
-            for k in range(len(jtid)):
-                if brjt2[i] == jtid[k]:
-                    bendx.append(bjtx[k])
-                    bendy.append(bjty[k])
-                    bendz2.append(jhdiff[k])
+def _connection_values(properties, member_id, property_name):
+    for row in properties:
+        if _value(row, "ID") != member_id or _value(row, "Name", "") != property_name:
+            continue
+        parts = str(_value(row, "ShapeVal", "") or "").split(",")
+        values = []
+        for index in (0, 1):
+            value = parts[index].strip() if index < len(parts) else "0"
+            values.append(0 if value == "3.00" else _as_float(value, 0.0))
+        return tuple(values)
+    return 0, 0
 
 
-for p in range(len(stdflrid)):
-    for i in range(len(brstdflr)):
-        if brstdflr[i] == stdflrid[p]:
-            bstartz.append(levelb[p] + height[p])
-            bendz.append(levelb[p] + height[p])
+def _meaningful_parameters(row, names):
+    return {name: _value(row, name) for name in names}
 
 
-
-for i in range(len(bstartz)):
-    bstartz[i] = bstartz[i] + bstartz2[i]
-    bendz[i] = bendz[i] + bendz2[i]
-
-
-for p in range(len(stdflrid)):
-    for i in range(len(brstdflr)):
-        if brstdflr[i] == stdflrid[p]:
-            for j in range(len(brsectinfo)):
-                if brsect[i] == brsectid[j] and brstdflr[i] in stdflrid:
-                    bsection.append("'" + brsectinfo[j] +"@"+brsectdetail[j]+ "'")
+def _json_safe(value):
+    if isinstance(value, bytes):
+        return value.hex()
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
-
-# wall data
-wgrid = []
-wsect = []
-wstdflr = []
-wid = []
-whd1 = []
-whd2 = []
-
-
-c = cnR.cursor()
-cursor11 = c.execute("SELECT GridID,SectID,StdFlrID,ID,HDiff1,HDiff2 from tblWallSeg")
-for row in cursor11:
-    wgrid.append(row[0])
-    wsect.append(row[1])
-    wstdflr.append(row[2])
-    wid.append(row[3])
-    whd1.append(row[4])
-    whd2.append(row[5])
-cnR.commit()
-
-
-wsectid=[]
-wsectinfo=[]
-c = cnR.cursor()
-cursor12 = c.execute("SELECT ID,B,H,T2,Dis,Kind from tblWallSect")
-for row in cursor12:
-    wsectid.append(row[0])
-    if (row[5] ==1):
-        wsectinfo.append(str(row[1]))
+def _vector_from_corner(record, corner_joint_id):
+    if record["jt1_id"] == corner_joint_id:
+        start = record["joint1"]
+        end = record["joint2"]
     else:
-        wsectinfo.append(str(row[1])+"@"+str(row[2]))
-        #wsectinfo.append(str(row[1])+"@"+str(row[2])+"@"+str(row[3])+"@"+str(row[4]))
-cnR.commit()
-
-
-w = []
-
-wstartx= []
-wstarty= []
-wstartz= []
-wfloor=[]
-
-for p in range(len(stdflrid)):
-    for i in range(len(wgrid)):
-        if wstdflr[i] == stdflrid[p]:
-            for j in range(len(gridid)):
-                if wgrid[i] == gridid[j]:
-                    for k in range(len(jtid)):
-                        if bjt1[j] == jtid[k]:
-                            wstartx.append(bjtx[k])
-                            wstarty.append(bjty[k])
-                            wstartz.append(levelb[p])
-
-                            wfloor.append(stdflrid[p])
-                            w.append(bid[i])
-
-#for j in range(len(stdflrid)):
-    #for i in range(len(wfloor)):
-        #if wfloor[i] == stdflrid[j]:
-            #wfloor[i] = stdflrid[j]
-
-            #wstartz.append(levelb[j])
-
-
-
-wendx= []
-wendy= []
-wendz= []
-
-for p in range(len(stdflrid)):
-    for i in range(len(wgrid)):
-        if wstdflr[i] == stdflrid[p]:
-            for j in range(len(gridid)):
-                if wgrid[i] == gridid[j]:
-                    for k in range(len(jtid)):
-                        if bjt2[j] == jtid[k]:
-                            wendx.append(bjtx[k])
-                            wendy.append(bjty[k])
-                            #wendz.append(jhdiff[k])
-
-wendz=wstartz
-
-#for p in range(len(stdflrid)):
-#    for i in range(len(grid)):
-#        if wstdflr[i] == stdflrid[p]:
-#            bstartz.append(levelb[p] + height[p])
-#            bendz.append(levelb[p] + height[p])
-
-# for i in range(len(bstartz)):
-#     bstartz[i] = bstartz[i] + bstartz2[i]
-#     bendz[i] = bendz[i] + bendz2[i]
-
-wsection=[]
-for p in range(len(stdflrid)):
-    for i in range(len(wgrid)):
-        if wstdflr[i] == stdflrid[p]:
-            for j in range(len(wsectinfo)):
-                if wsect[i] == wsectid[j] and wstdflr[i] in stdflrid:
-                    wsection.append("'" + wsectinfo[j] + "'")
-
-
-
-#柱子信息
-c = []
-for p in range(len(stdflrid)):
-    for i in range(len(cstdflr)):
-        if cstdflr[i] == stdflrid[p]:
-            for j in range(len(jtid)):
-                if cjt[i] == jtid[j] and cstdflr[i] in stdflrid:
-                    cstartx.append(bjtx[j])
-                    cstarty.append(bjty[j])
-                    c.append(cid[i])
-ceccx1=[]
-ceccy1=[]
-crot1=[]
-for i in range(len(c)):
-    for j in range(len(cid)):
-        if c[i]==cid[j]:
-            ceccx1.append(ceccx[j])
-            ceccy1.append(ceccy[j])
-            crot1.append((crot[j]))
-
-
-for j in range(len(stdflrid)):
-    for i in range(len(cstdflr)):
-        if cstdflr[i] == stdflrid[j] and cstdflr[i] in stdflrid:
-            cstartz.append(levelb[j])
-            cendz.append(levelb[j] + height[j])
-
-for p in range(len(stdflrid)):
-    for i in range(len(cstdflr)):
-        if cstdflr[i] == stdflrid[p]:
-            for j in range(len(csectid)):
-                if csect[i] == csectid[j] and cstdflr[i] in stdflrid:
-                    csection.append("'" + csectinfo[j] +"@"+csectdetail[j]+ "'")
-
-# 判断梁的点铰接
-spbinfo = []
-spbidd = []
-for i in range(len(spbid)):
-    if spbname[i] == "SpBeam":
-        # for j in range(len(bid)):
-        #     if spbid[i]== bid[j]:
-        temp1 = spbshape[i]
-        spbinfo.append(temp1[0:(temp1.find(",", (temp1.find(",")) + 1))])
-        spbidd.append(spbid[i])
-
-bsconn = []
-beconn = []
-for i in range(len(bstartx)):
-    bsconn.append(0)
-    beconn.append(0)
-    for j in range(len(spbidd)):
-        if b[i] == spbidd[j]:
-            temp1 = spbinfo[j]
-            bsconn[i]= temp1[0:(temp1.find(","))]
-            beconn[i]= temp1[temp1.find(",") + 1:9]
-
-
-
-# 判断柱的点铰接
-spcinfo = []
-spcidd = []
-for i in range(len(spbid)):
-    if spbname[i] == "SpColm":
-        # for j in range(len(bid)):
-        #     if spbid[i]== bid[j]:
-        temp1 = spbshape[i]
-        spcinfo.append(temp1[0:(temp1.find(",", (temp1.find(",")) + 1))])
-        spcidd.append(spbid[i])
-
-csconn = []
-ceconn = []
-for i in range(len(cstartx)):
-    for j in range(len(spcidd)):
-        if c[i] == spcidd[j]:
-            temp1 = spcinfo[j]
-            csconn.append(temp1[0:(temp1.find(","))])
-            ceconn.append(temp1[temp1.find(",") + 1:9])
-
-
-
-for i in range(len(bsconn)):
-    if bsconn[i] == "3.00":
-        bsconn[i] = "0"
-    if beconn[i] == "3.00":
-        beconn[i] = "0"
-
-for i in range(len(csconn)):
-    if csconn[i] == "3.00":
-        csconn[i] = "0"
-    if ceconn[i] == "3.00":
-        ceconn[i] = "0"
-
-# 梁z向偏移
-for i in range(len(bstartx)):
-    for j in range(len(bid)):
-        if b[i] == bid[j]:
-            bstartz[i] = float(bstartz[i]) + float(hd1[j])
-            bendz[i] = float(bendz[i]) + float(hd2[j])
-
-if os.access(r'Y:\数字化课题\数据库\ydb转换数据库.db',os.F_OK):
-    db_file_path=r'Y:\数字化课题\数据库\ydb转换数据库.db'
-else:
-    db_file_path = r'C:\ProgramData\Autodesk\Revit\Addins\2018\数据库\ydb转换数据库.db'
-
-cnY = sqlite3.connect(db_file_path)
-# print("Opened database successfully")
-
-
-cuY = cnY.cursor()
-
-# ---------------------------------------------------------
-# Copy tblSubSectionSect table logic
-# ---------------------------------------------------------
-try:
-    print("Attempting to copy tblSubSectionSect...")
-    source_cursor = cnR.cursor()
-    dest_cursor = cnY.cursor()
-
-    # Check if table exists in source
-    source_cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tblSubSectionSect'")
-    if source_cursor.fetchone():
-        # Get schema
-        source_cursor.execute("PRAGMA table_info(tblSubSectionSect)")
-        columns = source_cursor.fetchall()
-        
-        if columns:
-            # Build query strings dynamically based on source schema
-            column_defs = ", ".join([f"{col[1]} {col[2]}" for col in columns])
-            column_names = ", ".join([col[1] for col in columns])
-            placeholders = ", ".join(["?"] * len(columns))
-
-            # Create table in destination (Drop if exists to ensure clean copy)
-            dest_cursor.execute("DROP TABLE IF EXISTS tblSubSectionSect")
-            dest_cursor.execute(f"CREATE TABLE tblSubSectionSect ({column_defs})")
-
-            # Fetch and insert data
-            source_cursor.execute("SELECT * FROM tblSubSectionSect")
-            rows = source_cursor.fetchall()
-            if rows:
-                dest_cursor.executemany(f"INSERT INTO tblSubSectionSect ({column_names}) VALUES ({placeholders})", rows)
-            
-            cnY.commit()
-            print(f"Successfully copied tblSubSectionSect with {len(rows)} rows.")
-        else:
-            print("tblSubSectionSect exists but has no columns defined.")
-    else:
-        print("tblSubSectionSect does not exist in the source file. Skipping copy.")
-
-except Exception as e:
-    print(f"An error occurred while copying tblSubSectionSect: {e}")
-# ---------------------------------------------------------
-
-
-
-tbl1 = []
-for tt in range(15):
-    tbl1.append([])
-for i in range(0, len(bstartx)):
-    tbl1[0].append(bstartx[i])
-    tbl1[1].append(bstarty[i])
-    tbl1[2].append(bstartz[i])
-    tbl1[3].append(bendx[i])
-    tbl1[4].append(bendy[i])
-    tbl1[5].append(bendz[i])
-    tbl1[6].append(bsection[i])
-    tbl1[7].append(0)
-    tbl1[8].append(i + 1)
-    tbl1[9].append("null")
-    tbl1[10].append(bsconn[i])
-    tbl1[11].append(beconn[i])
-    tbl1[12].append(becc[i])    # 新增：Ecc（mm，带符号，起点端）
-    tbl1[13].append(becc2[i])   # 新增：Ecc2（mm，带符号，终点端）
-    tbl1[14].append(brot[i])    # 新增：BRotation（度）
-tbl1_T = list(zip(*tbl1))
-
-# aaa = []
-# tbl11 = []
-# temp2 = []
-# for row in tbl1_T:
-#     aaa.append(row[6])
-# for i in range(len(aaa)):
-#     temp1 = aaa[i]
-#     temp2.append(temp1[1:(temp1.find(","))])
-#
-# for i in range(len(tbl1_T)):
-#     if int(temp2[i]) != 1:
-#         tbl11.append(tbl1_T[i])
-
-
-
-cuY.execute("drop table if exists tbl1;")
-cuY.execute('''
-CREATE TABLE tbl1 
-    (
-    BStartX            REAL,
-    BStartY           REAL,
-    BStartZ           REAL,
-    BEndX           REAL,
-    BEndY           REAL,
-    BEndZ           REAL,
-    BSection           TEXT,
-    Tag                 INTEGER   DEFAULT 0,
-    ID                INTEGER,
-    RvtID             TEXT,
-    BSConn            REAL,
-    BEConn            REAL,
-    Ecc               REAL,
-    Ecc2              REAL,
-    BRotation         REAL);''')
-cnY.commit()
-sql_insert = "INSERT INTO tbl1(BStartX,BStartY,BStartZ,BEndX,BEndY,BEndZ,BSection,Tag,ID,RvtID,BSConn,BEConn,Ecc,Ecc2,BRotation) VALUES"
-sql_values = ""
-sql_values1 = ""
-for i in range(len(tbl1_T)):
-    a = []
-    List = tbl1_T[i]
-    for j in range(len(List)):
-        s = str(List[j])
-        a.append(s)
-    for k in range(0, len(a)):
-        sql_values += a[k]
-        sql_values += ","
-    sql_values1 = "(" + sql_values.strip(',') + ")"
-    sql_todo = sql_insert + sql_values1
-    cuY = cnY.cursor()
-    cuY.execute(sql_todo)
-    sql_values = ""
-    sql_value1 = ""
-cnY.commit()
-
-
-
-tbl2 = []
-for tt in range(12):
-    tbl2.append([])
-for i in range(0, len(cstartx)):
-    tbl2[0].append(cstartx[i])
-    tbl2[1].append(cstarty[i])
-    tbl2[2].append(cstartz[i])
-    tbl2[3].append(cstartx[i])
-    tbl2[4].append(cstarty[i])
-    tbl2[5].append(cendz[i])
-    tbl2[6].append(csection[i])
-    tbl2[7].append(0)
-    tbl2[8].append(i + 1)
-    tbl2[9].append("null")
-    tbl2[10].append(csconn[i])
-    tbl2[11].append(ceconn[i])
-tbl2_T = list(zip(*tbl2))
-
-bbb = []
-tbl22 = []
-temp3 = []
-for row in tbl2_T:
-    bbb.append(row[6])
-for i in range(len(bbb)):
-    temp1 = bbb[i]
-    temp3.append(temp1[1:(temp1.find(","))])
-
-for i in range(len(tbl2_T)):
-    if int(temp3[i]) != 1:
-        tbl22.append(tbl2_T[i])
-
-tbl2 = []
-for tt in range(13):
-    tbl2.append([])
-for i in range(0, len(cstartx)):
-    tbl2[0].append(cstartx[i])
-    tbl2[1].append(cstarty[i])
-    tbl2[2].append(cstartz[i])
-    tbl2[3].append(cstartx[i])
-    tbl2[4].append(cstarty[i])
-    tbl2[5].append(cendz[i])
-    tbl2[6].append(csection[i])
-    tbl2[7].append(0)
-    tbl2[8].append(i + 1)
-    tbl2[9].append("null")
-    tbl2[10].append(ceccx1[i])
-    tbl2[11].append(ceccy1[i])
-    tbl2[12].append(crot1[i])
-    # tbl2[10].append(csconn[i])
-    # tbl2[11].append(ceconn[i])
-tbl2_T = list(zip(*tbl2))
-
-# bbb = []
-# tbl22 = []
-# temp3 = []
-# for row in tbl2_T:
-#     bbb.append(row[6])
-# for i in range(len(bbb)):
-#     temp1 = bbb[i]
-#     temp3.append(temp1[1:(temp1.find(","))])
-#
-# for i in range(len(tbl2_T)):
-#     if int(temp3[i]) != 1:
-#         tbl22.append(tbl2_T[i])
-
-cuY.execute("drop table if exists tbl2;")
-cuY.execute('''
-CREATE TABLE tbl2
-    (CStartX            REAL,
-    CStartY           REAL,
-    CStartZ           REAL,
-    CEndX           REAL,
-    CEndY           REAL,
-    CEndZ           REAL,
-    CSection           TEXT,
-    Tag                 INTEGER    DEFAULT 0,
-    ID               INTEGER,
-    RvtID            TEXT,
-    EccX             REAL,
-    EccY             REAL,
-    Rotation         REAL);''')
-cnY.commit()
-sql_insert = "INSERT INTO tbl2(CStartX,CStartY,CStartZ,CEndX,CEndY,CEndZ,CSection,Tag,ID,RvtID,EccX,EccY,Rotation) VALUES"
-sql_values = ""
-sql_values1 = ""
-for i in range(len(tbl2_T)):
-    a = []
-    List = tbl2_T[i]
-    for j in range(len(List)):
-        s = str(List[j])
-        a.append(s)
-    for k in range(0, len(a)):
-        sql_values += a[k]
-        sql_values += ","
-    sql_values1 = "(" + sql_values.strip(',') + ")"
-    sql_todo = sql_insert + sql_values1
-    cuY = cnY.cursor()
-    cuY.execute(sql_todo)
-    sql_values = ""
-    sql_value1 = ""
-cnY.commit()
-
-tbl3 = []
-for tt in range(2):
-    tbl3.append([])
-for i in range(0, len(levelb)):
-    tbl3[0].append("'" + str(i + 1) + 'F' + "'")
-    tbl3[1].append(levelb[i])
-tbl3[0].append("'" + "RF" + "'")
-tbl3[1].append(levelb[len(levelb) - 1] + height[len(levelb) - 1])
-tbl3_T = list(zip(*tbl3))
-
-cuY.execute("drop table if exists tbl3;")
-cuY.execute('''
-CREATE TABLE tbl3
-    (Floor            TEXT,
-    LevelB            REAL);''')
-cnY.commit()
-sql_insert = "INSERT INTO tbl3(Floor,LevelB) VALUES"
-sql_values = ""
-sql_values1 = ""
-for i in range(len(tbl3_T)):
-    a = []
-    List = tbl3_T[i]
-    for j in range(len(List)):
-        s = str(List[j])
-        a.append(s)
-    for k in range(0, len(a)):
-        sql_values += a[k]
-        sql_values += ","
-    sql_values1 = "(" + sql_values.strip(',') + ")"
-    sql_todo = sql_insert + sql_values1
-    cuY = cnY.cursor()
-    cuY.execute(sql_todo)
-    sql_values = ""
-    sql_value1 = ""
-cnY.commit()
-
-cuY.execute("drop table if exists CombineBeam;")
-cuY.execute('''
-CREATE TABLE CombineBeam
-    (id            TEXT,
-    StartX         TEXT,   
-    StartY        TEXT, 
-    StartZ         TEXT,  
-    EndX         TEXT,   
-    EndY        TEXT, 
-    EndZ         TEXT,
-    ShapeValue    TEXT,
-    Info          TEXT,
-    Ecc           TEXT);''')
-cnY.commit()
-
-
-# wall to sqlite
-tbl4 = []
-for tt in range(12):
-    tbl4.append([])
-for i in range(0, len(wstartx)):
-    tbl4[0].append(wstartx[i])
-    tbl4[1].append(wstarty[i])
-    tbl4[2].append(wstartz[i])
-    tbl4[3].append(wendx[i])
-    tbl4[4].append(wendy[i])
-    tbl4[5].append(wendz[i])
-    tbl4[6].append(wsection[i])
-    tbl4[7].append(0)
-    tbl4[8].append(i + 1)
-    tbl4[9].append("null")
-    tbl4[10].append(wfloor[i])
-    tbl4[11].append(0)
-tbl4_T = list(zip(*tbl4))
-
-# aaa = []
-# tbl11 = []
-# temp2 = []
-# for row in tbl1_T:
-#     aaa.append(row[6])
-# for i in range(len(aaa)):
-#     temp1 = aaa[i]
-#     temp2.append(temp1[1:(temp1.find(","))])
-#
-# for i in range(len(tbl1_T)):
-#     if int(temp2[i]) != 1:
-#         tbl11.append(tbl1_T[i])
-
-
-
-cuY.execute("drop table if exists tbl4;")
-cuY.execute('''
-CREATE TABLE tbl4 
-    (
-    WStartX            REAL,
-    WStartY           REAL,
-    WStartZ           REAL,
-    WEndX           REAL,
-    WEndY           REAL,
-    WEndZ           REAL,
-    WSection           TEXT,
-    Tag                 INTEGER   DEFAULT 0,
-    ID                INTEGER,
-    RvtID             TEXT,
-    BottomFloor            TEXT,
-    WEConn            REAL);''')
-cnY.commit()
-sql_insert = "INSERT INTO tbl4(WStartX,WStartY,WStartZ,WEndX,WEndY,WEndZ,WSection,Tag,ID,RvtID,BottomFloor,WEConn) VALUES"
-sql_values = ""
-sql_values1 = ""
-for i in range(len(tbl4_T)):
-    a = []
-    List = tbl4_T[i]
-    for j in range(len(List)):
-        s = str(List[j])
-        a.append(s)
-    for k in range(0, len(a)):
-        sql_values += a[k]
-        sql_values += ","
-    sql_values1 = "(" + sql_values.strip(',') + ")"
-    sql_todo = sql_insert + sql_values1
-    cuY = cnY.cursor()
-    cuY.execute(sql_todo)
-    sql_values = ""
-    sql_value1 = ""
-cnY.commit()
-
-# sql_insert = "INSERT INTO CombineBeam(id,StartX,StartY,StartZ,EndX,EndY,EndZ,ShapeValue) VALUES(1,1,1,1,1,1,1,1)"
-# cuY.execute(sql_insert)
-# cnY.commit()
+        start = record["joint2"]
+        end = record["joint1"]
+    return (
+        _as_float(_value(end, "X")) - _as_float(_value(start, "X")),
+        _as_float(_value(end, "Y")) - _as_float(_value(start, "Y")),
+    )
+
+
+def _shared_joint(first, second):
+    shared = {first["jt1_id"], first["jt2_id"]}.intersection(
+        {second["jt1_id"], second["jt2_id"]}
+    )
+    return next(iter(shared)) if len(shared) == 1 else None
+
+
+def _perpendicular_score(first, second, corner_joint_id):
+    vector1 = _vector_from_corner(first, corner_joint_id)
+    vector2 = _vector_from_corner(second, corner_joint_id)
+    norm1 = math.hypot(*vector1)
+    norm2 = math.hypot(*vector2)
+    if norm1 == 0 or norm2 == 0:
+        return None
+    return abs(vector1[0] * vector2[0] + vector1[1] * vector2[1]) / (norm1 * norm2)
+
+
+def _orient_from_corner(record, corner_joint_id):
+    """For L walls, make each output line point from the corner outwards."""
+    if record["jt1_id"] == corner_joint_id:
+        record["output_reversed"] = False
+        return
+    record["start"], record["end"] = record["end"], record["start"]
+    record["output_jt1_id"], record["output_jt2_id"] = (
+        record["output_jt2_id"], record["output_jt1_id"]
+    )
+    record["output_reversed"] = True
+
+
+def _boundary_h_profiles(column_segments_by_node, column_sections, floor_id, joint_id):
+    profiles = []
+    for segment in column_segments_by_node.get((floor_id, joint_id), []):
+        section = column_sections.get(_value(segment, "SectID"))
+        dimensions = _h_dimensions(section)
+        if dimensions is None:
+            continue
+        profiles.append({
+            "section": _h_section_name(section),
+            "height_mm": dimensions[0],
+            "flange_width_mm": dimensions[1],
+            "web_thickness_mm": dimensions[2],
+            "flange_thickness_mm": dimensions[3],
+            "ecc_x_mm": _value(segment, "EccX", 0),
+            "ecc_y_mm": _value(segment, "EccY", 0),
+            "rotation_deg": _value(segment, "Rotation", 0),
+        })
+    return profiles
+
+
+def _build_wall_info(record, column_segments_by_node, column_sections):
+    section = record["section"]
+    segment = record["segment"]
+    section_parameters = _meaningful_parameters(section, (
+        "No_", "Mat", "Kind", "B", "H", "T2", "Dis", "Dis1",
+        "colsect1", "colShapeVal1", "colsect2", "colShapeVal2",
+        "Name", "StateFlag",
+    ))
+    segment_parameters = _meaningful_parameters(segment, (
+        "No_", "Ecc", "HDiff1", "HDiff2", "HDiffB", "sloping",
+        "EccDown", "offset1", "offset2", "HDiffB2", "WallJY",
+        "NoSlab", "Prefix", "No", "Suffix", "StateFlag",
+    ))
+    start_joint_id = record["output_jt1_id"]
+    end_joint_id = record["output_jt2_id"]
+    layout = {
+        "shape": record["shape"],
+        "group_id": record["group_id"],
+        "leg_id": record["leg_id"],
+        "leg_role": record["leg_role"],
+        "output_direction": "corner_to_outside" if record["shape"] == "L" else "source_grid_direction",
+        "source_direction_reversed": record["output_reversed"],
+    }
+    if record.get("corner") is not None:
+        layout["corner_mm"] = {
+            "x": _value(record["corner"], "X"),
+            "y": _value(record["corner"], "Y"),
+        }
+        layout["turn_sign"] = record.get("turn_sign")
+
+    info = {
+        "version": WINFO_VERSION,
+        "layout": layout,
+        "concrete_outer": {"thickness_mm": _value(section, "B")},
+        "section_parameters": section_parameters,
+        "segment_parameters": segment_parameters,
+        "boundary_h": {
+            "start": _boundary_h_profiles(
+                column_segments_by_node, column_sections, record["std_floor_id"], start_joint_id
+            ),
+            "end": _boundary_h_profiles(
+                column_segments_by_node, column_sections, record["std_floor_id"], end_joint_id
+            ),
+        },
+        "modeling": {
+            "create_concrete_wall": True,
+            "create_wall_internal_h": False,
+            "create_connection_plate_geometry": False,
+            "create_rebar_instances": False,
+        },
+    }
+    if record.get("warning"):
+        info["warning"] = record["warning"]
+    return json.dumps(
+        _json_safe(info), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+
+
+def _copy_table(source, destination, table_name):
+    destination.execute("DROP TABLE IF EXISTS " + _quote_identifier(table_name))
+    if not _table_exists(source, table_name):
+        return 0
+    info = list(source.execute("PRAGMA table_info(" + _quote_identifier(table_name) + ")"))
+    if not info:
+        return 0
+    definitions = []
+    for column in info:
+        definitions.append(_quote_identifier(column[1]) + " " + (column[2] or "TEXT"))
+    destination.execute(
+        "CREATE TABLE " + _quote_identifier(table_name) + " (" + ",".join(definitions) + ")"
+    )
+    rows = list(source.execute("SELECT * FROM " + _quote_identifier(table_name)))
+    if rows:
+        column_names = [_quote_identifier(column[1]) for column in info]
+        placeholders = ",".join("?" for _ in info)
+        destination.executemany(
+            "INSERT INTO " + _quote_identifier(table_name)
+            + " (" + ",".join(column_names) + ") VALUES (" + placeholders + ")",
+            [tuple(row) for row in rows],
+        )
+    return len(rows)
+
+
+def convert_ydb(source_path, destination_path):
+    source_path = Path(source_path).expanduser().resolve()
+    destination_path = Path(destination_path).expanduser().resolve()
+    if not source_path.is_file():
+        raise FileNotFoundError("YDB file does not exist: " + str(source_path))
+    if source_path == destination_path:
+        raise ValueError("Source YDB and destination database must be different files")
+
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    source = sqlite3.connect(str(source_path))
+    source.row_factory = sqlite3.Row
+    source.text_factory = _decode_sqlite_text
+
+    required_tables = ("tblFloor", "tblGrid", "tblJoint")
+    missing = [name for name in required_tables if not _table_exists(source, name)]
+    if missing:
+        source.close()
+        raise ValueError("YDB is missing required tables: " + ", ".join(missing))
+
+    floors = _ordered_rows(source, "tblFloor")
+    if not floors:
+        source.close()
+        raise ValueError("tblFloor contains no natural floors")
+
+    grids = _ordered_rows(source, "tblGrid")
+    joints = _ordered_rows(source, "tblJoint")
+    beam_segments = _ordered_rows(source, "tblBeamSeg")
+    beam_sections = _row_map(_ordered_rows(source, "tblBeamSect"))
+    subsections = _row_map(_ordered_rows(source, "tblSubSectionSect"))
+    column_segments = _ordered_rows(source, "tblColSeg")
+    column_sections = _row_map(_ordered_rows(source, "tblColSect"))
+    brace_segments = _ordered_rows(source, "tblBraceSeg")
+    brace_sections = _row_map(_ordered_rows(source, "tblBraceSect"))
+    wall_segments = _ordered_rows(source, "tblWallSeg")
+    wall_sections = _row_map(_ordered_rows(source, "tblWallSect"))
+    properties = _ordered_rows(source, "tblProperty")
+
+    grids_by_key = {}
+    grids_by_id = {}
+    for row in grids:
+        grids_by_key[(_value(row, "StdFlrID"), _value(row, "ID"))] = row
+        grids_by_id[_value(row, "ID")] = row
+    joints_by_key = {}
+    joints_by_id = {}
+    for row in joints:
+        joints_by_key[(_value(row, "StdFlrID"), _value(row, "ID"))] = row
+        joints_by_id[_value(row, "ID")] = row
+
+    def grid_for(floor_id, grid_id):
+        return grids_by_key.get((floor_id, grid_id)) or grids_by_id.get(grid_id)
+
+    def joint_for(floor_id, joint_id):
+        return joints_by_key.get((floor_id, joint_id)) or joints_by_id.get(joint_id)
+
+    beam_segments_by_floor = _group_by(beam_segments, "StdFlrID")
+    column_segments_by_floor = _group_by(column_segments, "StdFlrID")
+    brace_segments_by_floor = _group_by(brace_segments, "StdFlrID")
+    wall_segments_by_floor = _group_by(wall_segments, "StdFlrID")
+
+    pec_wall_nodes = set()
+    for segment in wall_segments:
+        section = wall_sections.get(_value(segment, "SectID"))
+        if _section_kind(section) not in PEC_WALL_KINDS:
+            continue
+        standard_floor_id = _value(segment, "StdFlrID")
+        grid = grid_for(standard_floor_id, _value(segment, "GridID"))
+        if grid is not None:
+            pec_wall_nodes.add((standard_floor_id, _value(grid, "Jt1ID")))
+            pec_wall_nodes.add((standard_floor_id, _value(grid, "Jt2ID")))
+
+    tbl1_rows = []
+    for floor in floors:
+        standard_floor_id = _value(floor, "StdFlrID")
+        top_z = _as_float(_value(floor, "LevelB")) + _as_float(_value(floor, "Height"))
+        for segment in beam_segments_by_floor.get(standard_floor_id, []):
+            grid = grid_for(standard_floor_id, _value(segment, "GridID"))
+            if grid is None:
+                continue
+            joint1 = joint_for(standard_floor_id, _value(grid, "Jt1ID"))
+            joint2 = joint_for(standard_floor_id, _value(grid, "Jt2ID"))
+            if joint1 is None or joint2 is None:
+                continue
+            section = beam_sections.get(_value(segment, "SectID"))
+            if _section_kind(section) == 209:
+                section_text = _h_section_name(
+                    section, subsections.get(_value(segment, "SectID")), pec=True
+                )
+            else:
+                section_text = _legacy_section_text(section)
+            start_z = top_z + _as_float(_value(joint1, "HDiff")) + _as_float(_value(segment, "HDiff1"))
+            end_z = top_z + _as_float(_value(joint2, "HDiff")) + _as_float(_value(segment, "HDiff2"))
+            start_connection, end_connection = _connection_values(
+                properties, _value(segment, "ID"), "SpBeam"
+            )
+            tbl1_rows.append((
+                _value(joint1, "X"), _value(joint1, "Y"), start_z,
+                _value(joint2, "X"), _value(joint2, "Y"), end_z,
+                section_text, 0, len(tbl1_rows) + 1, None,
+                start_connection, end_connection,
+                _value(segment, "Ecc", 0),
+                _value(segment, "Ecc2", _value(segment, "Ecc", 0)),
+                _value(segment, "Rotation", 0),
+            ))
+
+        for segment in brace_segments_by_floor.get(standard_floor_id, []):
+            joint1 = joint_for(standard_floor_id, _value(segment, "Jt1ID"))
+            joint2 = joint_for(standard_floor_id, _value(segment, "Jt2ID"))
+            if joint1 is None or joint2 is None:
+                continue
+            section = brace_sections.get(_value(segment, "SectID"))
+            tbl1_rows.append((
+                _value(joint1, "X"), _value(joint1, "Y"),
+                top_z + _as_float(_value(joint1, "HDiff")) + _as_float(_value(segment, "HDiff1")),
+                _value(joint2, "X"), _value(joint2, "Y"),
+                top_z + _as_float(_value(joint2, "HDiff")) + _as_float(_value(segment, "HDiff2")),
+                _legacy_section_text(section), 0, len(tbl1_rows) + 1, None,
+                0, 0, 0, 0, 0,
+            ))
+
+    tbl2_rows = []
+    for floor in floors:
+        standard_floor_id = _value(floor, "StdFlrID")
+        bottom_z = _as_float(_value(floor, "LevelB"))
+        top_z = bottom_z + _as_float(_value(floor, "Height"))
+        for segment in column_segments_by_floor.get(standard_floor_id, []):
+            joint = joint_for(standard_floor_id, _value(segment, "JtID"))
+            if joint is None:
+                continue
+            section = column_sections.get(_value(segment, "SectID"))
+            kind = _section_kind(section)
+            is_pec_h = kind == 209 or (
+                kind == 2 and (standard_floor_id, _value(segment, "JtID")) in pec_wall_nodes
+            )
+            section_text = (
+                _h_section_name(section, subsections.get(_value(segment, "SectID")), pec=True)
+                if is_pec_h else _legacy_section_text(section)
+            )
+            tbl2_rows.append((
+                _value(joint, "X"), _value(joint, "Y"), bottom_z,
+                _value(joint, "X"), _value(joint, "Y"), top_z,
+                section_text, 0, len(tbl2_rows) + 1, None,
+                _value(segment, "EccX", 0),
+                _value(segment, "EccY", 0),
+                _value(segment, "Rotation", 0),
+            ))
+
+    column_segments_by_node = {}
+    for segment in column_segments:
+        key = (_value(segment, "StdFlrID"), _value(segment, "JtID"))
+        column_segments_by_node.setdefault(key, []).append(segment)
+
+    wall_records = []
+    for floor_index, floor in enumerate(floors):
+        standard_floor_id = _value(floor, "StdFlrID")
+        bottom_z = _as_float(_value(floor, "LevelB"))
+        for source_order, segment in enumerate(wall_segments_by_floor.get(standard_floor_id, [])):
+            grid = grid_for(standard_floor_id, _value(segment, "GridID"))
+            if grid is None:
+                continue
+            joint1 = joint_for(standard_floor_id, _value(grid, "Jt1ID"))
+            joint2 = joint_for(standard_floor_id, _value(grid, "Jt2ID"))
+            if joint1 is None or joint2 is None:
+                continue
+            section = wall_sections.get(_value(segment, "SectID"))
+            kind = _section_kind(section)
+            thickness = _value(section, "B", "")
+            if kind == 1 or kind in PEC_WALL_KINDS:
+                wall_section = _format_number(thickness)
+            else:
+                second = _value(section, "H")
+                wall_section = _format_number(thickness)
+                if second is not None:
+                    wall_section += "@" + _format_number(second)
+            wall_records.append({
+                "floor_instance": floor_index,
+                "source_order": source_order,
+                "std_floor_id": standard_floor_id,
+                "segment": segment,
+                "section": section,
+                "kind": kind,
+                "joint1": joint1,
+                "joint2": joint2,
+                "jt1_id": _value(grid, "Jt1ID"),
+                "jt2_id": _value(grid, "Jt2ID"),
+                "output_jt1_id": _value(grid, "Jt1ID"),
+                "output_jt2_id": _value(grid, "Jt2ID"),
+                "start": [_value(joint1, "X"), _value(joint1, "Y"), bottom_z],
+                "end": [_value(joint2, "X"), _value(joint2, "Y"), bottom_z],
+                "wall_section": wall_section,
+                "bottom_floor": str(standard_floor_id),
+                "is_pec": kind in PEC_WALL_KINDS,
+                "output_reversed": False,
+                "shape": None,
+                "group_id": None,
+                "leg_id": None,
+                "leg_role": None,
+                "corner": None,
+                "turn_sign": None,
+            })
+
+    group_counter = 0
+    records_by_floor = {}
+    for record in wall_records:
+        records_by_floor.setdefault(record["floor_instance"], []).append(record)
+    for floor_index in sorted(records_by_floor):
+        pec_records = [record for record in records_by_floor[floor_index] if record["is_pec"]]
+        main_records = [record for record in pec_records if record["kind"] == PEC_MAIN_WALL_KIND]
+        secondary_records = [record for record in pec_records if record["kind"] == PEC_SECONDARY_WALL_KIND]
+        assigned = set()
+        groups = []
+        for secondary in secondary_records:
+            candidates = []
+            for main in main_records:
+                if id(main) in assigned:
+                    continue
+                corner_joint_id = _shared_joint(main, secondary)
+                if corner_joint_id is None:
+                    continue
+                score = _perpendicular_score(main, secondary, corner_joint_id)
+                if score is not None and score <= 0.05:
+                    candidates.append((score, main["source_order"], main, corner_joint_id))
+            if not candidates:
+                continue
+            _, _, main, corner_joint_id = min(candidates, key=lambda item: (item[0], item[1]))
+            assigned.add(id(main))
+            assigned.add(id(secondary))
+            groups.append((min(main["source_order"], secondary["source_order"]), [main, secondary], corner_joint_id))
+        for record in pec_records:
+            if id(record) not in assigned:
+                groups.append((record["source_order"], [record], None))
+        groups.sort(key=lambda item: item[0])
+
+        for _, members, corner_joint_id in groups:
+            group_counter += 1
+            group_id = "PECW" + str(group_counter).zfill(4)
+            if len(members) == 2:
+                main = next(item for item in members if item["kind"] == PEC_MAIN_WALL_KIND)
+                secondary = next(item for item in members if item["kind"] == PEC_SECONDARY_WALL_KIND)
+                corner = joint_for(main["std_floor_id"], corner_joint_id)
+                _orient_from_corner(main, corner_joint_id)
+                _orient_from_corner(secondary, corner_joint_id)
+                main_vector = (main["end"][0] - main["start"][0], main["end"][1] - main["start"][1])
+                secondary_vector = (
+                    secondary["end"][0] - secondary["start"][0],
+                    secondary["end"][1] - secondary["start"][1],
+                )
+                cross = main_vector[0] * secondary_vector[1] - main_vector[1] * secondary_vector[0]
+                turn_sign = 1 if cross > 0 else -1 if cross < 0 else 0
+                for leg_index, (record, role) in enumerate(
+                    ((main, "MAIN"), (secondary, "SECONDARY")), start=1
+                ):
+                    record.update({
+                        "shape": "L",
+                        "group_id": group_id,
+                        "leg_id": group_id + "-L" + str(leg_index),
+                        "leg_role": role,
+                        "corner": corner,
+                        "turn_sign": turn_sign,
+                    })
+            else:
+                record = members[0]
+                record.update({
+                    "shape": "I",
+                    "group_id": group_id,
+                    "leg_id": group_id + "-L1",
+                    "leg_role": "MAIN",
+                })
+                if record["kind"] == PEC_SECONDARY_WALL_KIND:
+                    record["warning"] = "Kind 212 has no perpendicular Kind 211 partner; exported as I"
+
+    tbl4_rows = []
+    for record in wall_records:
+        wall_info = None
+        if record["is_pec"]:
+            wall_info = _build_wall_info(record, column_segments_by_node, column_sections)
+        tbl4_rows.append((
+            record["start"][0], record["start"][1], record["start"][2],
+            record["end"][0], record["end"][1], record["end"][2],
+            record["wall_section"], 0, len(tbl4_rows) + 1, None,
+            record["bottom_floor"], 0,
+            record["group_id"], record["leg_id"], record["leg_role"],
+            record["shape"], wall_info,
+        ))
+
+    tbl3_rows = []
+    for index, floor in enumerate(floors, start=1):
+        tbl3_rows.append((str(index) + "F", _value(floor, "LevelB")))
+    last_floor = floors[-1]
+    tbl3_rows.append((
+        "RF",
+        _as_float(_value(last_floor, "LevelB")) + _as_float(_value(last_floor, "Height")),
+    ))
+
+    destination = sqlite3.connect(str(destination_path))
+    try:
+        with destination:
+            copied_subsections = _copy_table(source, destination, "tblSubSectionSect")
+
+            destination.execute("DROP TABLE IF EXISTS tbl1")
+            destination.execute("""
+                CREATE TABLE tbl1 (
+                    BStartX REAL, BStartY REAL, BStartZ REAL,
+                    BEndX REAL, BEndY REAL, BEndZ REAL,
+                    BSection TEXT, Tag INTEGER DEFAULT 0, ID INTEGER, RvtID TEXT,
+                    BSConn REAL, BEConn REAL, Ecc REAL, Ecc2 REAL, BRotation REAL
+                )
+            """)
+            destination.executemany(
+                "INSERT INTO tbl1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", tbl1_rows
+            )
+
+            destination.execute("DROP TABLE IF EXISTS tbl2")
+            destination.execute("""
+                CREATE TABLE tbl2 (
+                    CStartX REAL, CStartY REAL, CStartZ REAL,
+                    CEndX REAL, CEndY REAL, CEndZ REAL,
+                    CSection TEXT, Tag INTEGER DEFAULT 0, ID INTEGER, RvtID TEXT,
+                    EccX REAL, EccY REAL, Rotation REAL
+                )
+            """)
+            destination.executemany(
+                "INSERT INTO tbl2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", tbl2_rows
+            )
+
+            destination.execute("DROP TABLE IF EXISTS tbl3")
+            destination.execute("CREATE TABLE tbl3 (Floor TEXT, LevelB REAL)")
+            destination.executemany("INSERT INTO tbl3 VALUES (?,?)", tbl3_rows)
+
+            destination.execute("DROP TABLE IF EXISTS CombineBeam")
+            destination.execute("""
+                CREATE TABLE CombineBeam (
+                    id TEXT, StartX TEXT, StartY TEXT, StartZ TEXT,
+                    EndX TEXT, EndY TEXT, EndZ TEXT,
+                    ShapeValue TEXT, Info TEXT, Ecc TEXT
+                )
+            """)
+
+            destination.execute("DROP TABLE IF EXISTS tbl4")
+            destination.execute("""
+                CREATE TABLE tbl4 (
+                    WStartX REAL, WStartY REAL, WStartZ REAL,
+                    WEndX REAL, WEndY REAL, WEndZ REAL,
+                    WSection TEXT, Tag INTEGER DEFAULT 0, ID INTEGER, RvtID TEXT,
+                    BottomFloor TEXT, WEConn REAL,
+                    WGroupID TEXT, WLegID TEXT, WLegRole TEXT, WShape TEXT, WInfo TEXT
+                )
+            """)
+            destination.executemany(
+                "INSERT INTO tbl4 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", tbl4_rows
+            )
+            destination.execute("PRAGMA user_version = 2")
+    finally:
+        destination.close()
+        source.close()
+
+    return {
+        "source": str(source_path),
+        "destination": str(destination_path),
+        "beams_and_braces": len(tbl1_rows),
+        "columns": len(tbl2_rows),
+        "levels": len(tbl3_rows),
+        "wall_legs": len(tbl4_rows),
+        "pec_wall_groups": group_counter,
+        "copied_subsections": copied_subsections,
+    }
+
+
+def _default_destination():
+    network_path = Path(r"Y:\数字化课题\数据库\ydb转换数据库.db")
+    if network_path.exists():
+        return network_path
+    return Path(r"C:\ProgramData\Autodesk\Revit\Addins\2018\数据库\ydb转换数据库.db")
+
+
+def _choose_source_file():
+    """Open the native Windows file dialog without a Tcl/Tk dependency."""
+    import ctypes
+    from ctypes import wintypes
+
+    class OpenFileNameW(ctypes.Structure):
+        _fields_ = [
+            ("lStructSize", wintypes.DWORD),
+            ("hwndOwner", wintypes.HWND),
+            ("hInstance", wintypes.HINSTANCE),
+            ("lpstrFilter", wintypes.LPCWSTR),
+            ("lpstrCustomFilter", wintypes.LPWSTR),
+            ("nMaxCustFilter", wintypes.DWORD),
+            ("nFilterIndex", wintypes.DWORD),
+            ("lpstrFile", wintypes.LPWSTR),
+            ("nMaxFile", wintypes.DWORD),
+            ("lpstrFileTitle", wintypes.LPWSTR),
+            ("nMaxFileTitle", wintypes.DWORD),
+            ("lpstrInitialDir", wintypes.LPCWSTR),
+            ("lpstrTitle", wintypes.LPCWSTR),
+            ("Flags", wintypes.DWORD),
+            ("nFileOffset", wintypes.WORD),
+            ("nFileExtension", wintypes.WORD),
+            ("lpstrDefExt", wintypes.LPCWSTR),
+            ("lCustData", wintypes.LPARAM),
+            ("lpfnHook", ctypes.c_void_p),
+            ("lpTemplateName", wintypes.LPCWSTR),
+            ("pvReserved", ctypes.c_void_p),
+            ("dwReserved", wintypes.DWORD),
+            ("FlagsEx", wintypes.DWORD),
+        ]
+
+    file_buffer = ctypes.create_unicode_buffer(32768)
+    dialog = OpenFileNameW()
+    dialog.lStructSize = ctypes.sizeof(OpenFileNameW)
+    dialog.lpstrFilter = "YJK database (*.ydb)\0*.ydb\0All files (*.*)\0*.*\0\0"
+    dialog.nFilterIndex = 1
+    dialog.lpstrFile = ctypes.cast(file_buffer, wintypes.LPWSTR)
+    dialog.nMaxFile = len(file_buffer)
+    dialog.lpstrTitle = "选择 YJK YDB 文件"
+    dialog.lpstrDefExt = "ydb"
+    dialog.Flags = 0x00080000 | 0x00001000 | 0x00000800 | 0x00000008
+
+    if ctypes.windll.comdlg32.GetOpenFileNameW(ctypes.byref(dialog)):
+        return file_buffer.value
+    error_code = ctypes.windll.comdlg32.CommDlgExtendedError()
+    if error_code:
+        raise OSError("Windows file dialog failed with code " + hex(error_code))
+    return ""
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Convert a YJK ydb file to the Revit handoff database")
+    parser.add_argument("source", nargs="?", help="input .ydb file; omit to use the file chooser")
+    parser.add_argument("-o", "--output", help="destination SQLite database")
+    args = parser.parse_args(argv)
+
+    source_path = args.source or _choose_source_file()
+    if not source_path:
+        print("No YDB file selected")
+        return 1
+    destination_path = args.output or str(_default_destination())
+    summary = convert_ydb(source_path, destination_path)
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
