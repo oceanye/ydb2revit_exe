@@ -4,60 +4,74 @@
 
 Python 实现：`ydb转换.py`
 
-本地验证样例（不提交公开仓库）：`PEC剪力墙测试/dtlmodel_PECWall.ydb`
+墙参数协议：`WInfo v4`
 
-## 1. 构件边界
+## 1. 最终构件边界
 
-1. 梁、柱继续使用原有 `tbl1`、`tbl2`，不追加 `YdbColID`、`YdbSectID`、`YdbJtID`、`YdbFloorID`。
-2. PEC 梁以及 PEC 墙端柱用截面名末尾的 `@PEC` 标识，不增加专用梁柱表。
-3. Main 墙两端的普通 `tblColSect.Kind=2` H 型钢是独立建模的 PEC 端柱，必须进入 `tbl2`。
-4. 墙保持“一条直墙段对应 `tbl4` 一行”；Revit 墙必须基于 `Wall`，不得用 `Column` 代替。
-5. Main 墙采用 I 形钢构造：两端 H 柱、中间腹板及可选内部加劲肋。
-6. Secondary 墙采用 T 形钢构造：只有腹板和外端翼缘，自身没有 H 柱；尾端连接 Main 的 H 柱。
-7. Revit 本阶段创建混凝土外轮廓墙和 `tbl2` 端柱。墙内腹板、加劲肋、T 形翼缘、连接板和钢筋仅作为参数保留，不创建实体。
+1. 梁、柱继续使用 `tbl1`、`tbl2`，不追加 YDB 内部 ID 字段。
+2. PEC 梁、独立 PEC 柱及 PEC Main 端柱统一使用
+   `H{h}x{b}x{tw}x{tf}@PEC` 截面字符串。
+3. Main 墙端 H 是独立 Column，实体来源为 `tbl2`；墙通过 `tbl2.ID`
+   建立索引关联，不在 `WInfo` 重复 H 截面参数。
+4. 每条直墙肢对应 `tbl4` 一行。混凝土墙必须由 Revit `Wall`
+   创建，不得使用 Column 代替。
+5. Main 的钢构形式为 I：两端 H、中间腹板及可选加劲板。
+6. Secondary 的钢构形式为 T：中间腹板和外端翼缘，自身没有 H；
+   尾部连接同组 Main 公共角点的 H。
+7. 本阶段只创建混凝土 Wall 和 `tbl2` 中的 H Column。墙内腹板、加劲板、
+   T 翼缘、连接板和钢筋不创建实体，但参数必须写入数据库，供 Revit
+   写入墙参数或后续功能调用。
 
-所有坐标和截面尺寸均为 mm，角度为度。Revit API 负责换算为内部英尺。
+所有坐标和截面尺寸单位均为 mm，角度为度。Revit API 负责换算内部英尺。
 
 ## 2. Python 使用方式
 
 ```powershell
-python .\ydb转换.py C:\path\to\model.ydb -o C:\temp\ydb转换数据库.db
+python .\ydb转换.py C:\path\to\dtlmodel.ydb -o C:\temp\ydb转换数据库.db
 ```
 
-不指定 `-o` 时仍使用原有默认数据库位置；双击 EXE 时使用 Windows 原生文件选择窗口。
+不指定 `-o` 时沿用原有默认数据库位置；双击 EXE 时使用 Windows 原生文件选择框。
 
-## 3. 梁柱截面契约
+## 3. 梁柱表契约
 
-`tbl1`、`tbl2` 的既有列顺序不变。PEC H 型钢统一输出：
+### 3.1 截面
+
+PEC H 型钢统一输出：
 
 ```text
 H{截面高度}x{翼缘宽度}x{腹板厚度}x{翼缘厚度}@PEC
 ```
 
-识别规则：
+例如：
 
-- `tblBeamSect.Kind=209`：按 `t=H、d=W、u=tw、f=tf` 读取，字段缺失时回退到同 ID 的 `tblSubSectionSect`。
-- `tblColSect.Kind=209`：作为显式 PEC 柱输出 `H...@PEC`。
-- `tblColSect.Kind=2` 且柱节点为 `Kind=211` Main 墙端点：作为 PEC 墙端柱输出 `H...@PEC`。
-- Secondary 外端不属于 Main 墙端柱判定范围，因为 Secondary 自身不设置 H。
-- 其他普通柱保持既有 `tbl2` 截面格式。
+```text
+H300x200x8x20@PEC
+H600x300x7x22@PEC
+```
 
-Revit 端以最后一个 `@PEC` 判断 PEC 属性，去除后缀后再查找或生成 H 型钢族类型；`@PEC` 不是第五个截面尺寸。
+Revit 以末尾 `@PEC` 判断 PEC 属性，去掉后缀后解析四个截面尺寸。
 
-当前样例：
+### 3.2 墙端 H 的 tbl2 字段
 
-- PEC 梁：`H400x150x10x20@PEC`，1 根。
-- PEC Main 端柱：`H244x175x8x12@PEC`，4 根。
-- 其他独立柱：0 根。
+- `CStartX/CStartY`：保存 Main 墙端源节点坐标。
+- `CStartZ/CEndZ`：继续按现有楼层定义输出。
+- `CSection`：保存完整 H 截面及 `@PEC` 后缀。
+- `ID`：输出数据库内的稳定行号，供 `tbl4.WInfo.tbl2_column_refs` 引用。
+- `EccX/EccY/Rotation`：字段为兼容旧接口继续保留，但 PEC 墙端 H 统一写 `0`。
+- 独立 PEC 柱和普通柱不受上述归零规则影响，继续保留自身定位字段。
 
-## 4. `tbl4` 输出契约
+墙端 H 的中心位置和旋转必须由墙端点、墙方向和 H 尺寸计算，不再读取
+YDB 柱偏心或柱旋转。被任一 `tbl4.WInfo.tbl2_column_refs` 引用的 `tbl2.ID`
+即为墙端 H；未被引用的独立 PEC 柱仍走普通柱定位流程。
 
-前 12 列保持不变：
+## 4. tbl4 布置契约
+
+前 12 列保持原有顺序：
 
 | 下标 | 字段 |
 |---:|---|
 | 0–5 | `WStartX` 至 `WEndZ` |
-| 6 | `WSection` |
+| 6 | `WSection`，即混凝土墙厚 B |
 | 7 | `Tag` |
 | 8 | `ID` |
 | 9 | `RvtID` |
@@ -68,207 +82,277 @@ Revit 端以最后一个 `@PEC` 判断 PEC 属性，去除后缀后再查找或�
 
 | 下标 | 字段 | 含义 |
 |---:|---|---|
-| 12 | `WGroupID` | 逻辑 PEC 墙编号，例如 `PECW0001` |
-| 13 | `WLegID` | 直墙肢编号，例如 `PECW0001-L1` |
+| 12 | `WGroupID` | 逻辑 PEC 墙编号 |
+| 13 | `WLegID` | 直墙肢编号 |
 | 14 | `WLegRole` | `MAIN` 或 `SECONDARY` |
-| 15 | `WShape` | 逻辑平面组合：`I` 或 `L` |
-| 16 | `WInfo` | UTF-8 JSON 参数信息，当前版本 3 |
+| 15 | `WShape` | 平面组合 `I` 或 `L` |
+| 16 | `WInfo` | UTF-8 JSON，当前版本 4 |
 
-`WShape` 表示墙肢的平面组合，不等于钢构造截面形式。钢构造形式读取 `WInfo.steel_configuration.cross_section_form`：
+`WShape` 是平面组合；钢构截面形式读取
+`WInfo.steel_configuration.cross_section_form`。
 
-- Main：`I`
-- Secondary：`T`
-
-`WSection` 只保存混凝土外轮廓厚度 `tblWallSect.B`，例如 `175`。内部钢板参数不得拼接到 `WSection`。
-
-## 5. I/L 布置与追溯
+数据库同时创建 `idx_tbl2_id`、`idx_tbl4_group` 和 `idx_tbl4_leg`，便于
+Revit 按 H 引用、逻辑墙组和墙肢快速查询。JSON 中的引用值始终指向
+同一输出数据库的 `tbl2.ID`，不是 YDB 内部 ID。
 
 ### I 墙
 
-- 一个 Main 直段、一行 `tbl4`。
+- 一条 Main、一行 `tbl4`。
 - `WShape=I`、`WLegRole=MAIN`。
 - `WLegID={WGroupID}-L1`。
 
 ### L 墙
 
-- 一个 Main 直段和一个 Secondary 直段，共两行 `tbl4`。
-- 两行共享 `WGroupID`，并均为 `WShape=L`。
-- Main：`WLegRole=MAIN`、`WLegID=...-L1`。
-- Secondary：`WLegRole=SECONDARY`、`WLegID=...-L2`。
-- 两条输出定位线均从公共角点指向外端，因此起点相同。
-- `WInfo.layout.turn_sign`：`+1` 为 Main 到 Secondary 逆时针，`-1` 为顺时针。
+- Main 和 Secondary 各一行。
+- 共同 `WGroupID`，均为 `WShape=L`。
+- Main：`...-L1`、`WLegRole=MAIN`。
+- Secondary：`...-L2`、`WLegRole=SECONDARY`。
+- 两条输出定位线均从公共角点指向各自外端，因此两行 `WStart` 相同。
 
-组合条件为同一标准层、Main `Kind=211`、Secondary `Kind=212`、共享一个端点且近似垂直。没有 Secondary 的 Main 输出为 I。孤立 Secondary 仍保留输出并写入警告，但其 T 尾端连接状态为 `UNRESOLVED`，不能把它静默改造成 Main。
+墙肢长度只按节点坐标计算：
 
-## 6. Main I 形构造参数
+```text
+L = |WEnd - WStart|
+```
 
-Main 的字段映射已经由当前 YDB 与 DXF 截面相互验证：
+不得使用 `Dis1` 或其他截面字段作为墙长。
 
-构件归属也与盈建科公开说明一致：端部两颗柱子属于端柱，加劲肋设置在墙体内部。参考：[盈建科“端柱带肋钢板墙”说明](https://www.yjk.cn/article/787/)。
+## 5. WInfo v4
 
-| YDB 字段 | `WInfo` 字段 | 含义 |
-|---|---|---|
-| `B` | `concrete_outer.thickness_mm` | 混凝土外轮廓厚度 |
-| `H` | `steel_configuration.web_thickness_mm` | 中间腹板厚度 `tw` |
-| `T2` | `internal_stiffener.count` | 内部垂直加劲肋数量 |
-| `T2+3` | `partition_count` | 区隔数量 |
-| `Dis` | `internal_stiffener.width_mm` | 加劲肋宽度 |
-| `Dis1` | `internal_stiffener.thickness_mm` | 加劲肋厚度 |
-| Main 两端 `Kind=2` 柱 | `boundary_h.start/end` | 两端 H 柱参数引用，实体来源为 `tbl2` |
+`WInfo` 分为三部分：
 
-区隔规则：
+- `tbl2_column_refs`：关联独立 H Column。
+- `steel_configuration`：不可从通用布置字段推导的钢构输入/计算参数。
+- `source_parameters`：原始业务字段的信息透传，不驱动定位。
 
-| 区隔数 | `T2` | 内部加劲肋 |
-|---:|---:|---:|
-| 3 | 0 | 0 道 |
-| 4 | 1 | 1 道 |
-| 5 | 2 | 2 道 |
-
-当前 Main 参数为：混凝土厚度 175、腹板厚 6、4 区隔、1 道 175×6 加劲肋，两端 H 柱为 H244×175×8×12。
-
-## 7. Secondary T 形构造参数
-
-| YDB 字段 | `WInfo` 字段 | 含义 |
-|---|---|---|
-| `B` | `concrete_outer.thickness_mm`、`steel_configuration.flange.width_mm` | 混凝土外轮廓厚度；同时也是 T 形翼缘宽度 |
-| `H` | `steel_configuration.web_thickness_mm` | T 形腹板厚度 |
-| `Dis` | `steel_configuration.flange.thickness_mm` | 外端翼缘厚度 |
-| `Dis1` | `section_parameters.Dis1` | 原值透传；不作为翼缘宽度或墙段长度 |
-
-Secondary 的约束：
-
-- `has_own_end_h=false`，其 `boundary_h.start/end` 均为空。
-- 输出方向为公共角点到外端，故 T 尾位于 `start`。
-- `tail_connection.type=TAIL_TO_MAIN_H`。
-- `tail_connection.main_leg_id` 指向同组 Main 的 `WLegID`。
-- `tail_connection.connected_main_h` 仅引用 Main 端柱参数，不能据此再创建一根柱。
-- 墙段长度完全由源节点坐标形成的 `WStart/WEnd` 决定，不是 Secondary 截面输入参数。
-- 公共角点 H 柱为使一侧与 Secondary 墙面平齐，其偏心绝对值按 `(H 型钢高度-Secondary 宽度)/2` 校核；实际正负号由布置方向决定。
-- `tail_connection.alignment` 同时保存公式输入、期望偏心幅值和源 `EccY`，只用于校核，不能再次叠加偏移。
-
-当前 Secondary 参数为：混凝土厚度 175、腹板厚 8、翼缘宽 175、翼缘厚 20；`Dis1=150` 仍按原始字段保留，但不驱动上述尺寸。
-
-## 8. `WInfo v3` 示例
-
-Main：
+### 5.1 Main 示例
 
 ```json
 {
-  "version": 3,
-  "layout": {
-    "shape": "L",
-    "group_id": "PECW0001",
-    "leg_id": "PECW0001-L1",
-    "leg_role": "MAIN"
+  "version": 4,
+  "tbl2_column_refs": {
+    "start": 3,
+    "end": 4
   },
-  "concrete_outer": {"thickness_mm": 175},
   "steel_configuration": {
-    "component_role": "MAIN",
     "cross_section_form": "I",
-    "web_thickness_mm": 6,
+    "web_thickness_mm": 10,
     "partition_count": 4,
     "internal_stiffener": {
       "count": 1,
-      "width_mm": 175,
-      "thickness_mm": 6
-    },
-    "end_h_columns": {
-      "expected_count": 2,
-      "details_path": "boundary_h",
-      "modeling_source": "tbl2"
+      "width_mm": 250,
+      "thickness_mm": 8
     }
   },
-  "boundary_h": {
-    "start": [{"section": "H244x175x8x12"}],
-    "end": [{"section": "H244x175x8x12"}]
+  "source_parameters": {
+    "section": {
+      "Kind": 211,
+      "B": 300,
+      "H": 10,
+      "T2": 1,
+      "Dis": 250,
+      "Dis1": 8
+    },
+    "segment": {}
   }
 }
 ```
 
-Secondary：
+`tbl2_column_refs.start/end` 分别对应本行 `WStart/WEnd` 处的 H Column，
+数值引用 `tbl2.ID`。两端 H 可以采用不同截面，不需要在墙中复制参数。
+
+Main 参数映射：
+
+| YDB 字段 | v4 字段 | 说明 |
+|---|---|---|
+| `H` | `web_thickness_mm` | Main 中间腹板厚度 |
+| `T2+3` | `partition_count` | 3、4、5 区隔 |
+| `T2` | `internal_stiffener.count` | 计算后直接写出 |
+| `Dis` | `internal_stiffener.width_mm` | 加劲板宽度 |
+| `Dis1` | `internal_stiffener.thickness_mm` | 加劲板厚度 |
+
+区隔与加劲板数量：
+
+| 区隔 | 加劲板数量 |
+|---:|---:|
+| 3 | 0 |
+| 4 | 1 |
+| 5 | 2 |
+
+即使数量为 0，YDB 中输入的加劲板宽度和厚度仍保留为信息参数，但不得生成板。
+
+### 5.2 Secondary 示例
 
 ```json
 {
-  "version": 3,
-  "layout": {
-    "shape": "L",
-    "group_id": "PECW0001",
-    "leg_id": "PECW0001-L2",
-    "leg_role": "SECONDARY"
+  "version": 4,
+  "tbl2_column_refs": {
+    "connected_main": 3
   },
-  "concrete_outer": {"thickness_mm": 175},
   "steel_configuration": {
-    "component_role": "SECONDARY",
     "cross_section_form": "T",
-    "web_thickness_mm": 8,
-    "flange": {"width_mm": 175, "thickness_mm": 20},
-    "has_own_end_h": false,
-    "tail_connection": {
-      "type": "TAIL_TO_MAIN_H",
-      "location": "start",
-      "main_leg_id": "PECW0001-L1",
-      "connected_main_h": [{"section": "H244x175x8x12"}],
-      "alignment": {
-        "purpose": "ALIGN_ONE_H_FACE_WITH_SECONDARY_WALL_FACE",
-        "rule": "(MAIN_H_HEIGHT-SECONDARY_WIDTH)/2",
-        "main_h_height_mm": 244,
-        "secondary_width_mm": 175,
-        "expected_offset_magnitude_mm": 34.5,
-        "actual_h_ecc_y_mm": -35,
-        "verified_within_1mm": true
-      }
-    }
+    "web_thickness_mm": 12,
+    "flange_thickness_mm": 14
   },
-  "boundary_h": {"start": [], "end": []}
+  "source_parameters": {
+    "section": {
+      "Kind": 212,
+      "B": 300,
+      "H": 12,
+      "Dis": 14,
+      "Dis1": 150
+    },
+    "segment": {}
+  }
 }
 ```
 
-`section_parameters` 和 `segment_parameters` 仍完整保留 YDB 业务字段。连接板、钢筋及当前未直接驱动几何的字段继续作为信息透传，不输出额外 YDB ID 列。
+Secondary 只保存两个不可推导的核心输入：腹板厚度和翼缘厚度。
 
-## 9. Revit API 建模要求
+| 参数 | 获取方式 |
+|---|---|
+| 混凝土墙厚 | `WSection` |
+| T 翼缘宽度 | 等于 `WSection` |
+| T 翼缘厚度 | `flange_thickness_mm` |
+| T 腹板厚度 | `web_thickness_mm` |
+| 长度 | `|WEnd-WStart|` |
+| 连接 H | `tbl2_column_refs.connected_main` |
+| T 位置和旋转 | 根据 Secondary 节点方向计算 |
 
-### 9.1 建模顺序
+`source_parameters.section.Dis1` 仅保留原值，不作为翼缘宽度、墙长或定位参数。
 
-1. 按既有 `tbl3` 创建或匹配楼层，禁止二次提取层高和标准层。
-2. 读取 `tbl2`，创建 PEC Main 两端 H 柱；应用原有柱偏心和旋转。
-3. 读取 `tbl4`，每行创建一个 Revit `Wall`，类型厚度取 `WSection`。
-4. 对 `WShape=L` 的 L1/L2 按共同 `WGroupID` 连接墙端。
-5. 将 `WGroupID/WLegID/WLegRole/WShape/WInfo` 写入共享参数或可追溯存储。
-6. 按既有方式分别回写每行 `RvtID`，共同 `WGroupID` 不能覆盖行级 ID。
+### 5.3 不再保存的重复定位信息
 
-### 9.2 去重规则
+v4 删除：
 
-- Main 端 H 柱只从 `tbl2` 创建一次。
-- 柱定位直接应用 `tbl2.EccX/EccY/Rotation`；`tail_connection.alignment` 是解释与校核信息，不得把计算值再加一次。
-- `boundary_h` 和 `tail_connection.connected_main_h` 都是关系与参数引用，禁止再次创建 Column。
-- Secondary 自身没有 H 柱，不得在其外端或尾端自动补柱。
-- 腹板、加劲肋、T 形翼缘、连接板和逐根钢筋本阶段不创建几何。
-- `WInfo` 解析失败不得阻止混凝土墙创建，应记录日志并继续。
+- `boundary_h`
+- H 的 `ecc_x_mm/ecc_y_mm/rotation_deg`
+- `tail_connection.connected_main_h`
+- `tail_connection.alignment`
+- `tail_connection.main_leg_id`
+- Secondary 的重复 `flange.width_mm`
+- `concrete_outer`、重复 layout 和 modeling 开关
 
-## 10. 当前样例验收结果
+## 6. H 和 T 的计算定位规则
 
-- `tbl1`：1 行，`H400x150x10x20@PEC`。
-- `tbl2`：4 行，均为 `H244x175x8x12@PEC`。
+定义：
+
+```text
+uM = (Main.WEnd - Main.WStart) / Main长度
+uS = (Secondary.WEnd - Secondary.WStart) / Secondary长度
+```
+
+H 截面字符串中第一项为高度 `hH`，第三项为 H 腹板厚度 `twH`。
+
+### 6.1 I 墙两端 H
+
+```text
+起点H中心 = Main.WStart + uM × hH_start / 2
+终点H中心 = Main.WEnd   - uM × hH_end   / 2
+```
+
+H 高度方向平行 Main 轴线，翼缘宽度方向垂直 Main 轴线。
+
+### 6.2 L 墙公共角点 H
+
+Main 和 Secondary 已统一从公共角点向外输出，因此：
+
+```text
+角点H中心 = Main.WStart + uM × (hH - Secondary.WSection) / 2
+```
+
+当前样例：
+
+```text
+(600 - 300) / 2 = 150
+```
+
+这使 H 的一侧与 Secondary 混凝土墙面平齐。符号由 `uM` 自动确定，
+数据库不再记录 `EccY=-150`。
+
+Main 外端 H 仍按 `hH/2` 向墙内定位。
+
+### 6.3 Main 腹板及加劲板
+
+- Main 腹板位于墙轴线上，厚度为 `web_thickness_mm`。
+- 腹板纵向范围为两端 H 的内侧边缘之间。
+- 加劲板数量读取计算后的 `internal_stiffener.count`。
+- 加劲板按净腹板长度等分布置；1 道位于中点，2 道位于三分点。
+- 加劲板宽度和厚度读取 `internal_stiffener.width_mm/thickness_mm`。
+
+这些参数写入数据库供 Revit 使用；当前阶段不创建钢板实体。
+
+### 6.4 Secondary T
+
+外端翼缘：
+
+```text
+翼缘中心 = Secondary.WEnd - uS × 翼缘厚度 / 2
+翼缘宽度 = Secondary.WSection
+```
+
+腹板：
+
+```text
+方向 = uS
+起点 = 公共角点 Main H 腹板朝 Secondary 一侧的外缘
+终点 = Secondary.WEnd - uS × 翼缘厚度
+厚度 = web_thickness_mm
+```
+
+因此不需要保存 T 的坐标、旋转或长度。
+
+## 7. Revit API 交接要求
+
+1. 按现有 `tbl3` 创建或匹配楼层，不重复提取层高和标准层。
+2. 读取 `tbl4`，每行创建一个混凝土 `Wall`，类型厚度取 `WSection`。
+3. 按 `WGroupID/WLegID/WLegRole/WShape` 识别 I/L 及 Main/Secondary。
+4. 解析 `WInfo.version=4`。
+5. Main 通过 `tbl2_column_refs.start/end` 查询 `tbl2.ID`，解析 `CSection`，
+   按第 6 节公式创建独立 H Column。
+6. Secondary 的 `connected_main` 只引用既有 Main 角点 H，禁止重复创建柱。
+7. 墙端 H 不读取 `tbl2.EccX/EccY/Rotation`；普通柱和独立 PEC 柱仍按原逻辑。
+8. 将 H 截面、Main 腹板、区隔、加劲板、Secondary 腹板/翼缘及后续连接板、
+   配筋信息写入对应 Revit 墙参数。
+9. 墙内钢板信息仅作为参数；除非后续另行要求，不创建腹板、加劲板或 T 翼缘实体。
+10. 每行分别回写 `RvtID`，不得用共同 `WGroupID` 覆盖行级 ID。
+
+### 建议完整性检查
+
+- Main 的 `start/end` 引用均应存在于 `tbl2.ID`。
+- Secondary 的 `connected_main` 应等于同组 Main 的 `start` 引用。
+- 被引用 `tbl2.CSection` 必须以 `@PEC` 结尾并可解析四个 H 尺寸。
+- Main 应有两个不同端点引用；Secondary 自身不得创建新的 H。
+- 引用缺失时仍可创建混凝土墙，但必须记录错误，不能静默复制 H。
+
+## 8. 当前实测 YDB 验证结果
+
+- `tbl1`：0 行。
+- `tbl2`：4 行，墙端 H 的偏心和旋转均为 0。
 - `tbl3`：`1F=0`、`RF=3300`。
-- `tbl4`：3 行。
-- `PECW0001-L1`：Main，I 形钢构造。
-- `PECW0001-L2`：Secondary，T 形钢构造，尾接 L1 的 H 柱。
-- `PECW0002-L1`：独立 Main，I 墙。
-- 逻辑墙共 2 组：一个 L、一个 I。
-- 普通墙样例继续正常转换，不产生 PEC 分组或 `WInfo`。
+- `tbl4`：3 行，共 2 个逻辑墙组。
 
-另一个手工参数样例已验证：
+具体内容：
 
-- I-Main 1：墙厚 200、腹板厚 10、3 区隔、0 道加劲肋，保留加劲肋参数 150×10；两端柱 H300×200×8×20。
-- L-Main：墙厚 300、腹板厚 10、4 区隔、1 道 250×8 加劲肋；两端柱 H600×300×7×22。
-- L-Secondary：墙厚及翼缘宽 300、腹板厚 12、翼缘厚 14，自身无 H；节点定位线长约 968.625。
-- 公共角点 H600 与 Secondary 300 的偏心校核为 `(600-300)/2=150`，源 `EccY=-150`，一侧平齐。
+- `PECW0001-L1`：I-Main，墙厚 200、腹板 10、3 区隔、0 道加劲板；
+  引用 H300×200×8×20 两根。
+- `PECW0002-L1`：L-Main，墙厚 300、腹板 10、4 区隔、1 道 250×8
+  加劲板；引用 H600×300×7×22 两根。
+- `PECW0002-L2`：Secondary，节点长度 968.625419、腹板 12、
+  翼缘 300×14，`connected_main` 引用 L-Main 角点 H。
+- L 角点 H 计算偏移为 `(600-300)/2=150`。
+- SQLite `integrity_check=ok`。
 
-## 11. 后续 C# 最小改动
+## 9. 参数核对 DXF
 
-1. 梁柱截面解析支持末尾 `@PEC`。
-2. 墙查询使用显式列名并读取新增 5 列。
-3. PEC 墙始终调用 `Wall.Create`；端 H 柱走现有 Column 流程。
-4. 按 `WGroupID` 组合 L1/L2，按 `WLegRole` 区分 Main/Secondary。
-5. 解析 `WInfo.version=3`，把 I/T、腹板、区隔、加劲肋及连接信息写入参数。
-6. 严格执行去重规则：`tbl2` 建柱，`WInfo` 只引用。
+生成命令：
+
+```powershell
+python .\tools\export_pec_wall_check_dxf.py `
+  C:\path\to\dtlmodel.ydb `
+  -o .\validation_output\PEC墙参数测量核对.dxf
+```
+
+DXF 以 1:1 mm 绘制墙节点线、混凝土轮廓、引用 H、计算偏移、Main 腹板、
+加劲板、Secondary 腹板和 T 翼缘。H 的位置与旋转由 v4 规则计算，
+不会读取 `tbl2.EccX/EccY/Rotation`。

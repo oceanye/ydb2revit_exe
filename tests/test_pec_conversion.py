@@ -71,8 +71,8 @@ def create_anonymous_pec_fixture(path):
                 JtID INTEGER, EccX REAL, EccY REAL, Rotation REAL
             );
             INSERT INTO tblColSeg VALUES
-                (311,1,10,301,1,0,122,0), (312,2,10,301,2,0,-35,0),
-                (313,3,10,301,4,0,122,0), (314,4,10,301,5,0,-122,0);
+                (311,1,10,301,1,0,122,10), (312,2,10,301,2,0,-35,20),
+                (313,3,10,301,4,0,122,30), (314,4,10,301,5,0,-122,40);
 
             CREATE TABLE tblWallSect (
                 ID INTEGER, No_ INTEGER, Mat INTEGER, Kind INTEGER,
@@ -166,13 +166,33 @@ class PecConversionTests(unittest.TestCase):
             infos = [json.loads(row[0]) for row in connection.execute(
                 "SELECT WInfo FROM tbl4 WHERE WInfo IS NOT NULL ORDER BY ID"
             )]
+            tbl2_ids = {
+                row[0] for row in connection.execute("SELECT ID FROM tbl2")
+            }
+            index_names = {
+                row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                )
+            }
         self.assertEqual(3, len(infos))
-        self.assertEqual(211, infos[0]["section_parameters"]["Kind"])
-        self.assertEqual(6.0, infos[0]["section_parameters"]["Dis1"])
-        self.assertEqual(212, infos[1]["section_parameters"]["Kind"])
-        self.assertEqual(150.0, infos[1]["section_parameters"]["Dis1"])
-        self.assertEqual("H244x175x8x12", infos[0]["boundary_h"]["start"][0]["section"])
-        self.assertEqual(3, infos[0]["version"])
+        self.assertEqual(211, infos[0]["source_parameters"]["section"]["Kind"])
+        self.assertEqual(6.0, infos[0]["source_parameters"]["section"]["Dis1"])
+        self.assertEqual(212, infos[1]["source_parameters"]["section"]["Kind"])
+        self.assertEqual(150.0, infos[1]["source_parameters"]["section"]["Dis1"])
+        self.assertEqual(4, infos[0]["version"])
+        self.assertEqual({"start": 2, "end": 1}, infos[0]["tbl2_column_refs"])
+        self.assertEqual({"connected_main": 2}, infos[1]["tbl2_column_refs"])
+        self.assertEqual({"start": 3, "end": 4}, infos[2]["tbl2_column_refs"])
+        referenced_ids = {
+            value
+            for info in infos
+            for value in info["tbl2_column_refs"].values()
+            if value is not None
+        }
+        self.assertTrue(referenced_ids.issubset(tbl2_ids))
+        self.assertTrue(
+            {"idx_tbl2_id", "idx_tbl4_group", "idx_tbl4_leg"}.issubset(index_names)
+        )
         main_steel = infos[0]["steel_configuration"]
         self.assertEqual("I", main_steel["cross_section_form"])
         self.assertEqual(6.0, main_steel["web_thickness_mm"])
@@ -183,42 +203,85 @@ class PecConversionTests(unittest.TestCase):
         secondary_steel = infos[1]["steel_configuration"]
         self.assertEqual("T", secondary_steel["cross_section_form"])
         self.assertEqual(8.0, secondary_steel["web_thickness_mm"])
-        self.assertEqual(175.0, secondary_steel["flange"]["width_mm"])
-        self.assertEqual(20.0, secondary_steel["flange"]["thickness_mm"])
-        self.assertFalse(secondary_steel["has_own_end_h"])
-        self.assertEqual("PECW0001-L1", secondary_steel["tail_connection"]["main_leg_id"])
-        self.assertEqual("TAIL_TO_MAIN_H", secondary_steel["tail_connection"]["type"])
-        alignment = secondary_steel["tail_connection"]["alignment"]
-        self.assertEqual(244.0, alignment["main_h_height_mm"])
-        self.assertEqual(175.0, alignment["secondary_width_mm"])
-        self.assertEqual(34.5, alignment["expected_offset_magnitude_mm"])
-        self.assertEqual(-35, alignment["actual_h_ecc_y_mm"])
-        self.assertTrue(alignment["verified_within_1mm"])
-        self.assertEqual({"start": [], "end": []}, infos[1]["boundary_h"])
-        self.assertTrue(infos[0]["modeling"]["boundary_h_columns_are_in_tbl2"])
-        self.assertFalse(infos[1]["modeling"]["boundary_h_columns_are_in_tbl2"])
-        self.assertFalse(infos[0]["modeling"]["create_wall_internal_h"])
+        self.assertEqual(20.0, secondary_steel["flange_thickness_mm"])
+        self.assertNotIn("flange", secondary_steel)
+        for removed_key in ("layout", "concrete_outer", "boundary_h", "modeling"):
+            self.assertNotIn(removed_key, infos[0])
+        self.assertNotIn("tail_connection", secondary_steel)
 
     def test_main_wall_partition_mapping_covers_three_four_and_five(self):
-        boundary_h = {"start": [{}], "end": [{}]}
         for source_t2, partitions, stiffeners in ((0, 3, 0), (1, 4, 1), (2, 5, 2)):
             section = {"H": 6, "T2": source_t2, "Dis": 175, "Dis1": 6}
-            config = CONVERTER._main_wall_steel_configuration(section, boundary_h)
+            config = CONVERTER._main_wall_steel_configuration(section)
             self.assertEqual(partitions, config["partition_count"])
             self.assertEqual(stiffeners, config["internal_stiffener"]["count"])
 
-    def test_secondary_flange_and_flush_alignment_mapping(self):
+    def test_secondary_minimal_parameter_mapping(self):
         section = {"B": 300, "H": 12, "Dis": 14, "Dis1": 150}
-        connected_h = [{"height_mm": 600, "ecc_y_mm": -150}]
-        config = CONVERTER._secondary_wall_steel_configuration(
-            section, "PECW0002-L1", connected_h
-        )
-        self.assertEqual(300, config["flange"]["width_mm"])
-        self.assertEqual(14, config["flange"]["thickness_mm"])
-        alignment = config["tail_connection"]["alignment"]
-        self.assertEqual(150.0, alignment["expected_offset_magnitude_mm"])
-        self.assertEqual(-150, alignment["actual_h_ecc_y_mm"])
-        self.assertTrue(alignment["verified_within_1mm"])
+        config = CONVERTER._secondary_wall_steel_configuration(section)
+        self.assertEqual({
+            "cross_section_form": "T",
+            "web_thickness_mm": 12,
+            "flange_thickness_mm": 14,
+        }, config)
+
+    def test_unpaired_secondary_has_no_false_h_reference(self):
+        source = Path(self.temp_dir.name) / "unpaired_secondary.ydb"
+        output = Path(self.temp_dir.name) / "unpaired_secondary.db"
+        with closing(sqlite3.connect(self.pec_source)) as original, closing(
+            sqlite3.connect(source)
+        ) as connection:
+            original.backup(connection)
+            connection.execute("DELETE FROM tblWallSeg WHERE SectID=101")
+            connection.commit()
+        CONVERTER.convert_ydb(source, output)
+        with closing(sqlite3.connect(output)) as connection:
+            raw_info = connection.execute(
+                "SELECT WInfo FROM tbl4 WHERE WLegRole='SECONDARY'"
+            ).fetchone()[0]
+        info = json.loads(raw_info)
+        self.assertEqual({"connected_main": None}, info["tbl2_column_refs"])
+        self.assertIn("warning", info)
+
+    def test_wall_end_h_placement_values_are_not_read_from_ydb(self):
+        with closing(sqlite3.connect(self.pec_output)) as connection:
+            placement_values = connection.execute(
+                "SELECT EccX,EccY,Rotation FROM tbl2 ORDER BY ID"
+            ).fetchall()
+        self.assertEqual([(0.0, 0.0, 0.0)] * 4, placement_values)
+
+    def test_tbl2_references_follow_each_natural_floor_instance(self):
+        source = Path(self.temp_dir.name) / "reused_standard_floor.ydb"
+        output = Path(self.temp_dir.name) / "reused_standard_floor.db"
+        with closing(sqlite3.connect(self.pec_source)) as original, closing(
+            sqlite3.connect(source)
+        ) as connection:
+            original.backup(connection)
+            connection.execute(
+                "INSERT INTO tblFloor VALUES (2,2,'',10,3300,3300)"
+            )
+            connection.commit()
+        CONVERTER.convert_ydb(source, output)
+        with closing(sqlite3.connect(output)) as connection:
+            rows = connection.execute(
+                "SELECT WStartZ,WInfo FROM tbl4 WHERE WInfo IS NOT NULL ORDER BY ID"
+            ).fetchall()
+        first_floor_refs = {
+            value
+            for z_value, raw_info in rows
+            if z_value == 0
+            for value in json.loads(raw_info)["tbl2_column_refs"].values()
+            if value is not None
+        }
+        second_floor_refs = {
+            value
+            for z_value, raw_info in rows
+            if z_value == 3300
+            for value in json.loads(raw_info)["tbl2_column_refs"].values()
+            if value is not None
+        }
+        self.assertEqual({1, 2, 3, 4}, first_floor_refs)
+        self.assertEqual({5, 6, 7, 8}, second_floor_refs)
 
     def test_true_standalone_pec_column_still_uses_h_suffix(self):
         source = Path(self.temp_dir.name) / "standalone_pec_column.ydb"
@@ -239,16 +302,18 @@ class PecConversionTests(unittest.TestCase):
                 "(302,12,2,13,'',200,400,8,400,200,16)"
             )
             connection.execute(
-                "INSERT INTO tblColSeg VALUES (315,5,10,302,6,0,0,0)"
+                "INSERT INTO tblColSeg VALUES (315,5,10,302,6,7,8,9)"
             )
             connection.commit()
         CONVERTER.convert_ydb(source, output)
         with closing(sqlite3.connect(output)) as connection:
-            sections = [row[0] for row in connection.execute(
-                "SELECT CSection FROM tbl2 ORDER BY ID"
-            )]
+            rows = connection.execute(
+                "SELECT CSection,EccX,EccY,Rotation FROM tbl2 ORDER BY ID"
+            ).fetchall()
+            sections = [row[0] for row in rows]
         self.assertEqual(["H244x175x8x12@PEC"] * 4, sections[:4])
         self.assertEqual("H400x200x8x16@PEC", sections[4])
+        self.assertEqual((7.0, 8.0, 9.0), rows[4][1:])
 
     def test_kind2_column_at_secondary_outer_end_is_not_a_main_end_column(self):
         source = Path(self.temp_dir.name) / "secondary_outer_column.ydb"

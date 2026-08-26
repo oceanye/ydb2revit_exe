@@ -27,7 +27,7 @@ from pathlib import Path
 PEC_WALL_KINDS = {211, 212}
 PEC_MAIN_WALL_KIND = 211
 PEC_SECONDARY_WALL_KIND = 212
-WINFO_VERSION = 3
+WINFO_VERSION = 4
 
 
 def _decode_sqlite_text(raw):
@@ -250,30 +250,9 @@ def _orient_from_corner(record, corner_joint_id):
     record["output_reversed"] = True
 
 
-def _boundary_h_profiles(column_segments_by_node, column_sections, floor_id, joint_id):
-    profiles = []
-    for segment in column_segments_by_node.get((floor_id, joint_id), []):
-        section = column_sections.get(_value(segment, "SectID"))
-        dimensions = _h_dimensions(section)
-        if dimensions is None:
-            continue
-        profiles.append({
-            "section": _h_section_name(section),
-            "height_mm": dimensions[0],
-            "flange_width_mm": dimensions[1],
-            "web_thickness_mm": dimensions[2],
-            "flange_thickness_mm": dimensions[3],
-            "ecc_x_mm": _value(segment, "EccX", 0),
-            "ecc_y_mm": _value(segment, "EccY", 0),
-            "rotation_deg": _value(segment, "Rotation", 0),
-        })
-    return profiles
-
-
-def _main_wall_steel_configuration(section, boundary_h):
+def _main_wall_steel_configuration(section):
     stiffener_count = max(0, _as_int(_value(section, "T2"), 0))
     return {
-        "component_role": "MAIN",
         "cross_section_form": "I",
         "web_thickness_mm": _value(section, "H"),
         "partition_count": stiffener_count + 3,
@@ -282,65 +261,23 @@ def _main_wall_steel_configuration(section, boundary_h):
             "width_mm": _value(section, "Dis"),
             "thickness_mm": _value(section, "Dis1"),
         },
-        "end_h_columns": {
-            "expected_count": 2,
-            "start_count": len(boundary_h["start"]),
-            "end_count": len(boundary_h["end"]),
-            "complete": bool(boundary_h["start"] and boundary_h["end"]),
-            "details_path": "boundary_h",
-            "modeling_source": "tbl2",
-        },
     }
 
 
-def _secondary_wall_steel_configuration(section, connected_main_leg_id, connected_h):
-    connected = bool(connected_main_leg_id)
-    secondary_width = _value(section, "B")
-    alignment = {
-        "purpose": "ALIGN_ONE_H_FACE_WITH_SECONDARY_WALL_FACE",
-        "rule": "(MAIN_H_HEIGHT-SECONDARY_WIDTH)/2",
-        "main_h_height_mm": None,
-        "secondary_width_mm": secondary_width,
-        "expected_offset_magnitude_mm": None,
-        "actual_h_ecc_y_mm": None,
-        "verified_within_1mm": False,
-    }
-    if connected_h:
-        main_h_height = _value(connected_h[0], "height_mm")
-        actual_ecc_y = _value(connected_h[0], "ecc_y_mm")
-        if main_h_height is not None and secondary_width is not None:
-            expected_offset = (
-                _as_float(main_h_height) - _as_float(secondary_width)
-            ) / 2.0
-            alignment.update({
-                "main_h_height_mm": main_h_height,
-                "expected_offset_magnitude_mm": expected_offset,
-                "actual_h_ecc_y_mm": actual_ecc_y,
-                "verified_within_1mm": (
-                    actual_ecc_y is not None
-                    and abs(abs(_as_float(actual_ecc_y)) - abs(expected_offset)) <= 1.0
-                ),
-            })
+def _secondary_wall_steel_configuration(section):
     return {
-        "component_role": "SECONDARY",
         "cross_section_form": "T",
         "web_thickness_mm": _value(section, "H"),
-        "flange": {
-            "width_mm": secondary_width,
-            "thickness_mm": _value(section, "Dis"),
-        },
-        "has_own_end_h": False,
-        "tail_connection": {
-            "type": "TAIL_TO_MAIN_H" if connected else "UNRESOLVED",
-            "location": "start" if connected else None,
-            "main_leg_id": connected_main_leg_id,
-            "connected_main_h": connected_h if connected else [],
-            "alignment": alignment,
-        },
+        "flange_thickness_mm": _value(section, "Dis"),
     }
 
 
-def _build_wall_info(record, column_segments_by_node, column_sections):
+def _first_column_id(column_ids_by_node, floor_instance, floor_id, joint_id):
+    ids = column_ids_by_node.get((floor_instance, floor_id, joint_id), [])
+    return ids[0] if ids else None
+
+
+def _build_wall_info(record, wall_h_column_ids_by_node):
     section = record["section"]
     segment = record["segment"]
     section_parameters = _meaningful_parameters(section, (
@@ -353,58 +290,43 @@ def _build_wall_info(record, column_segments_by_node, column_sections):
         "EccDown", "offset1", "offset2", "HDiffB2", "WallJY",
         "NoSlab", "Prefix", "No", "Suffix", "StateFlag",
     ))
-    start_joint_id = record["output_jt1_id"]
-    end_joint_id = record["output_jt2_id"]
-    endpoint_h = {
-        "start": _boundary_h_profiles(
-            column_segments_by_node, column_sections, record["std_floor_id"], start_joint_id
-        ),
-        "end": _boundary_h_profiles(
-            column_segments_by_node, column_sections, record["std_floor_id"], end_joint_id
-        ),
-    }
+    floor_id = record["std_floor_id"]
+    start_column_id = _first_column_id(
+        wall_h_column_ids_by_node,
+        record["floor_instance"],
+        floor_id,
+        record["output_jt1_id"],
+    )
+    end_column_id = _first_column_id(
+        wall_h_column_ids_by_node,
+        record["floor_instance"],
+        floor_id,
+        record["output_jt2_id"],
+    )
     if record["kind"] == PEC_MAIN_WALL_KIND:
-        boundary_h = endpoint_h
-        steel_configuration = _main_wall_steel_configuration(section, boundary_h)
-    else:
-        # A secondary leg has no H column of its own.  Its start point is the
-        # shared L corner after orientation, so the H profile found there is a
-        # reference to the main leg's independently modeled tbl2 end column.
-        boundary_h = {"start": [], "end": []}
-        steel_configuration = _secondary_wall_steel_configuration(
-            section, record.get("connected_main_leg_id"), endpoint_h["start"]
-        )
-    layout = {
-        "shape": record["shape"],
-        "group_id": record["group_id"],
-        "leg_id": record["leg_id"],
-        "leg_role": record["leg_role"],
-        "output_direction": "corner_to_outside" if record["shape"] == "L" else "source_grid_direction",
-        "source_direction_reversed": record["output_reversed"],
-    }
-    if record.get("corner") is not None:
-        layout["corner_mm"] = {
-            "x": _value(record["corner"], "X"),
-            "y": _value(record["corner"], "Y"),
+        steel_configuration = _main_wall_steel_configuration(section)
+        tbl2_column_refs = {
+            "start": start_column_id,
+            "end": end_column_id,
         }
-        layout["turn_sign"] = record.get("turn_sign")
+    else:
+        steel_configuration = _secondary_wall_steel_configuration(section)
+        tbl2_column_refs = {
+            # Both L legs are normalized from the common corner to the outer
+            # endpoint, so the secondary start resolves the main corner H.
+            "connected_main": start_column_id if record["shape"] == "L" else None,
+        }
 
     info = {
         "version": WINFO_VERSION,
-        "layout": layout,
-        "concrete_outer": {"thickness_mm": _value(section, "B")},
+        "tbl2_column_refs": tbl2_column_refs,
         "steel_configuration": steel_configuration,
-        "section_parameters": section_parameters,
-        "segment_parameters": segment_parameters,
-        "boundary_h": boundary_h,
-        "modeling": {
-            "create_concrete_wall": True,
-            "boundary_h_columns_are_in_tbl2": record["kind"] == PEC_MAIN_WALL_KIND,
-            "create_boundary_h_from_winfo": False,
-            "create_wall_internal_h": False,
-            "create_wall_steel_plate_geometry": False,
-            "create_connection_plate_geometry": False,
-            "create_rebar_instances": False,
+        # These fields preserve source information for later Revit parameter
+        # writing.  They are explicitly non-geometric: placement is derived
+        # from tbl4 endpoints, WLegRole/WShape and the referenced H dimensions.
+        "source_parameters": {
+            "section": section_parameters,
+            "segment": segment_parameters,
         },
     }
     if record.get("warning"):
@@ -559,7 +481,8 @@ def convert_ydb(source_path, destination_path):
             ))
 
     tbl2_rows = []
-    for floor in floors:
+    wall_h_column_ids_by_node = {}
+    for floor_instance, floor in enumerate(floors):
         standard_floor_id = _value(floor, "StdFlrID")
         bottom_z = _as_float(_value(floor, "LevelB"))
         top_z = bottom_z + _as_float(_value(floor, "Height"))
@@ -573,24 +496,40 @@ def convert_ydb(source_path, destination_path):
             # The Kind-2 H profiles at a main-wall endpoint are the two PEC end
             # columns.  They are modeled independently as columns, while WInfo
             # also references them to preserve the wall-to-column relationship.
-            is_pec_h = kind == 209 or (kind == 2 and node_key in pec_main_wall_nodes)
+            is_wall_end_h = kind == 2 and node_key in pec_main_wall_nodes
+            is_pec_h = kind == 209 or is_wall_end_h
             section_text = (
                 _h_section_name(section, subsections.get(_value(segment, "SectID")), pec=True)
                 if is_pec_h else _legacy_section_text(section)
             )
+            output_column_id = len(tbl2_rows) + 1
+            # PEC wall-end H placement is a wall relationship, not a source
+            # column eccentricity.  Keep the legacy columns for compatibility
+            # but make them neutral; Revit derives center and rotation from the
+            # referenced wall endpoint, direction and H dimensions.
+            if is_wall_end_h:
+                eccentric_x = 0
+                eccentric_y = 0
+                rotation = 0
+            else:
+                eccentric_x = _value(segment, "EccX", 0)
+                eccentric_y = _value(segment, "EccY", 0)
+                rotation = _value(segment, "Rotation", 0)
             tbl2_rows.append((
                 _value(joint, "X"), _value(joint, "Y"), bottom_z,
                 _value(joint, "X"), _value(joint, "Y"), top_z,
-                section_text, 0, len(tbl2_rows) + 1, None,
-                _value(segment, "EccX", 0),
-                _value(segment, "EccY", 0),
-                _value(segment, "Rotation", 0),
+                section_text, 0, output_column_id, None,
+                eccentric_x, eccentric_y, rotation,
             ))
-
-    column_segments_by_node = {}
-    for segment in column_segments:
-        key = (_value(segment, "StdFlrID"), _value(segment, "JtID"))
-        column_segments_by_node.setdefault(key, []).append(segment)
+            if is_wall_end_h:
+                reference_key = (
+                    floor_instance,
+                    standard_floor_id,
+                    _value(segment, "JtID"),
+                )
+                wall_h_column_ids_by_node.setdefault(reference_key, []).append(
+                    output_column_id
+                )
 
     wall_records = []
     for floor_index, floor in enumerate(floors):
@@ -700,7 +639,6 @@ def convert_ydb(source_path, destination_path):
                         "corner": corner,
                         "turn_sign": turn_sign,
                     })
-                secondary["connected_main_leg_id"] = main["leg_id"]
             else:
                 record = members[0]
                 record.update({
@@ -720,7 +658,7 @@ def convert_ydb(source_path, destination_path):
     for record in wall_records:
         wall_info = None
         if record["is_pec"]:
-            wall_info = _build_wall_info(record, column_segments_by_node, column_sections)
+            wall_info = _build_wall_info(record, wall_h_column_ids_by_node)
         tbl4_rows.append((
             record["start"][0], record["start"][1], record["start"][2],
             record["end"][0], record["end"][1], record["end"][2],
@@ -769,6 +707,9 @@ def convert_ydb(source_path, destination_path):
             destination.executemany(
                 "INSERT INTO tbl2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", tbl2_rows
             )
+            destination.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_tbl2_id ON tbl2(ID)"
+            )
 
             destination.execute("DROP TABLE IF EXISTS tbl3")
             destination.execute("CREATE TABLE tbl3 (Floor TEXT, LevelB REAL)")
@@ -795,6 +736,13 @@ def convert_ydb(source_path, destination_path):
             """)
             destination.executemany(
                 "INSERT INTO tbl4 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", tbl4_rows
+            )
+            destination.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tbl4_group ON tbl4(WGroupID)"
+            )
+            destination.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_tbl4_leg "
+                "ON tbl4(WLegID) WHERE WLegID IS NOT NULL"
             )
             destination.execute("PRAGMA user_version = 2")
     finally:
