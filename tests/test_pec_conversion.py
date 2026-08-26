@@ -134,13 +134,13 @@ class PecConversionTests(unittest.TestCase):
             columns[12:],
         )
 
-    def test_pec_beam_uses_suffix_and_wall_boundary_h_is_not_a_column(self):
+    def test_pec_beam_and_main_wall_end_columns_use_h_suffix(self):
         with closing(sqlite3.connect(self.pec_output)) as connection:
             beam_sections = [row[0] for row in connection.execute("SELECT BSection FROM tbl1")]
             column_sections = [row[0] for row in connection.execute("SELECT CSection FROM tbl2")]
             column_columns = [row[1] for row in connection.execute("PRAGMA table_info(tbl2)")]
         self.assertEqual(["H400x150x10x20@PEC"], beam_sections)
-        self.assertEqual([], column_sections)
+        self.assertEqual(["H244x175x8x12@PEC"] * 4, column_sections)
         self.assertFalse(any(name.startswith("Ydb") for name in column_columns))
 
     def test_l_and_i_wall_groups_are_traceable(self):
@@ -172,7 +172,34 @@ class PecConversionTests(unittest.TestCase):
         self.assertEqual(212, infos[1]["section_parameters"]["Kind"])
         self.assertEqual(150.0, infos[1]["section_parameters"]["Dis1"])
         self.assertEqual("H244x175x8x12", infos[0]["boundary_h"]["start"][0]["section"])
+        self.assertEqual(2, infos[0]["version"])
+        main_steel = infos[0]["steel_configuration"]
+        self.assertEqual("I", main_steel["cross_section_form"])
+        self.assertEqual(6.0, main_steel["web_thickness_mm"])
+        self.assertEqual(4, main_steel["partition_count"])
+        self.assertEqual(1, main_steel["internal_stiffener"]["count"])
+        self.assertEqual(175.0, main_steel["internal_stiffener"]["width_mm"])
+        self.assertEqual(6.0, main_steel["internal_stiffener"]["thickness_mm"])
+        secondary_steel = infos[1]["steel_configuration"]
+        self.assertEqual("T", secondary_steel["cross_section_form"])
+        self.assertEqual(8.0, secondary_steel["web_thickness_mm"])
+        self.assertEqual(150.0, secondary_steel["flange"]["width_mm"])
+        self.assertEqual(20.0, secondary_steel["flange"]["thickness_mm"])
+        self.assertFalse(secondary_steel["has_own_end_h"])
+        self.assertEqual("PECW0001-L1", secondary_steel["tail_connection"]["main_leg_id"])
+        self.assertEqual("TAIL_TO_MAIN_H", secondary_steel["tail_connection"]["type"])
+        self.assertEqual({"start": [], "end": []}, infos[1]["boundary_h"])
+        self.assertTrue(infos[0]["modeling"]["boundary_h_columns_are_in_tbl2"])
+        self.assertFalse(infos[1]["modeling"]["boundary_h_columns_are_in_tbl2"])
         self.assertFalse(infos[0]["modeling"]["create_wall_internal_h"])
+
+    def test_main_wall_partition_mapping_covers_three_four_and_five(self):
+        boundary_h = {"start": [{}], "end": [{}]}
+        for source_t2, partitions, stiffeners in ((0, 3, 0), (1, 4, 1), (2, 5, 2)):
+            section = {"H": 6, "T2": source_t2, "Dis": 175, "Dis1": 6}
+            config = CONVERTER._main_wall_steel_configuration(section, boundary_h)
+            self.assertEqual(partitions, config["partition_count"])
+            self.assertEqual(stiffeners, config["internal_stiffener"]["count"])
 
     def test_true_standalone_pec_column_still_uses_h_suffix(self):
         source = Path(self.temp_dir.name) / "standalone_pec_column.ydb"
@@ -201,7 +228,26 @@ class PecConversionTests(unittest.TestCase):
             sections = [row[0] for row in connection.execute(
                 "SELECT CSection FROM tbl2 ORDER BY ID"
             )]
-        self.assertEqual(["H400x200x8x16@PEC"], sections)
+        self.assertEqual(["H244x175x8x12@PEC"] * 4, sections[:4])
+        self.assertEqual("H400x200x8x16@PEC", sections[4])
+
+    def test_kind2_column_at_secondary_outer_end_is_not_a_main_end_column(self):
+        source = Path(self.temp_dir.name) / "secondary_outer_column.ydb"
+        output = Path(self.temp_dir.name) / "secondary_outer_column.db"
+        with closing(sqlite3.connect(self.pec_source)) as original, closing(
+            sqlite3.connect(source)
+        ) as connection:
+            original.backup(connection)
+            connection.execute(
+                "INSERT INTO tblColSeg VALUES (315,5,10,301,3,0,0,0)"
+            )
+            connection.commit()
+        CONVERTER.convert_ydb(source, output)
+        with closing(sqlite3.connect(output)) as connection:
+            section = connection.execute(
+                "SELECT CSection FROM tbl2 ORDER BY ID DESC LIMIT 1"
+            ).fetchone()[0]
+        self.assertFalse(section.endswith("@PEC"))
 
     def test_legacy_wall_sample_without_dis1_still_converts(self):
         with closing(sqlite3.connect(self.normal_output)) as connection:

@@ -4,13 +4,17 @@
 The first columns of tbl1/tbl2/tbl3/tbl4 are a compatibility contract with the
 existing Revit add-in. PEC data is deliberately compact:
 
-* True PEC beam/column H sections use ``H{h}x{b}x{tw}x{tf}@PEC``.
+* PEC beam/column H sections use ``H{h}x{b}x{tw}x{tf}@PEC``.  Ordinary Kind-2
+  H columns located at a PEC main-wall endpoint are PEC end columns and remain
+  independent tbl2 members.
 * Every straight wall leg is one tbl4 row.
 * A logical L wall is represented by two rows sharing WGroupID and carrying
   ``-L1`` / ``-L2`` leg identifiers.
-* Steel/rebar/plate data inside a PEC wall, including ordinary H profiles at
-  wall endpoints, is retained as JSON in WInfo; the converter does not turn it
-  into extra physical elements or tbl2 columns.
+* Main walls have an I steel arrangement (two independently modeled end H
+  columns, an internal web and optional stiffeners); secondary walls have a T
+  arrangement whose tail connects to the main H column.
+* Internal web/stiffener/flange/rebar/plate data is retained as JSON in WInfo;
+  only the concrete wall outline and independent tbl2 end columns are modeled.
 """
 
 import argparse
@@ -23,7 +27,7 @@ from pathlib import Path
 PEC_WALL_KINDS = {211, 212}
 PEC_MAIN_WALL_KIND = 211
 PEC_SECONDARY_WALL_KIND = 212
-WINFO_VERSION = 1
+WINFO_VERSION = 2
 
 
 def _decode_sqlite_text(raw):
@@ -266,6 +270,49 @@ def _boundary_h_profiles(column_segments_by_node, column_sections, floor_id, joi
     return profiles
 
 
+def _main_wall_steel_configuration(section, boundary_h):
+    stiffener_count = max(0, _as_int(_value(section, "T2"), 0))
+    return {
+        "component_role": "MAIN",
+        "cross_section_form": "I",
+        "web_thickness_mm": _value(section, "H"),
+        "partition_count": stiffener_count + 3,
+        "internal_stiffener": {
+            "count": stiffener_count,
+            "width_mm": _value(section, "Dis"),
+            "thickness_mm": _value(section, "Dis1"),
+        },
+        "end_h_columns": {
+            "expected_count": 2,
+            "start_count": len(boundary_h["start"]),
+            "end_count": len(boundary_h["end"]),
+            "complete": bool(boundary_h["start"] and boundary_h["end"]),
+            "details_path": "boundary_h",
+            "modeling_source": "tbl2",
+        },
+    }
+
+
+def _secondary_wall_steel_configuration(section, connected_main_leg_id, connected_h):
+    connected = bool(connected_main_leg_id)
+    return {
+        "component_role": "SECONDARY",
+        "cross_section_form": "T",
+        "web_thickness_mm": _value(section, "H"),
+        "flange": {
+            "width_mm": _value(section, "Dis1"),
+            "thickness_mm": _value(section, "Dis"),
+        },
+        "has_own_end_h": False,
+        "tail_connection": {
+            "type": "TAIL_TO_MAIN_H" if connected else "UNRESOLVED",
+            "location": "start" if connected else None,
+            "main_leg_id": connected_main_leg_id,
+            "connected_main_h": connected_h if connected else [],
+        },
+    }
+
+
 def _build_wall_info(record, column_segments_by_node, column_sections):
     section = record["section"]
     segment = record["segment"]
@@ -281,6 +328,25 @@ def _build_wall_info(record, column_segments_by_node, column_sections):
     ))
     start_joint_id = record["output_jt1_id"]
     end_joint_id = record["output_jt2_id"]
+    endpoint_h = {
+        "start": _boundary_h_profiles(
+            column_segments_by_node, column_sections, record["std_floor_id"], start_joint_id
+        ),
+        "end": _boundary_h_profiles(
+            column_segments_by_node, column_sections, record["std_floor_id"], end_joint_id
+        ),
+    }
+    if record["kind"] == PEC_MAIN_WALL_KIND:
+        boundary_h = endpoint_h
+        steel_configuration = _main_wall_steel_configuration(section, boundary_h)
+    else:
+        # A secondary leg has no H column of its own.  Its start point is the
+        # shared L corner after orientation, so the H profile found there is a
+        # reference to the main leg's independently modeled tbl2 end column.
+        boundary_h = {"start": [], "end": []}
+        steel_configuration = _secondary_wall_steel_configuration(
+            section, record.get("connected_main_leg_id"), endpoint_h["start"]
+        )
     layout = {
         "shape": record["shape"],
         "group_id": record["group_id"],
@@ -300,19 +366,16 @@ def _build_wall_info(record, column_segments_by_node, column_sections):
         "version": WINFO_VERSION,
         "layout": layout,
         "concrete_outer": {"thickness_mm": _value(section, "B")},
+        "steel_configuration": steel_configuration,
         "section_parameters": section_parameters,
         "segment_parameters": segment_parameters,
-        "boundary_h": {
-            "start": _boundary_h_profiles(
-                column_segments_by_node, column_sections, record["std_floor_id"], start_joint_id
-            ),
-            "end": _boundary_h_profiles(
-                column_segments_by_node, column_sections, record["std_floor_id"], end_joint_id
-            ),
-        },
+        "boundary_h": boundary_h,
         "modeling": {
             "create_concrete_wall": True,
+            "boundary_h_columns_are_in_tbl2": record["kind"] == PEC_MAIN_WALL_KIND,
+            "create_boundary_h_from_winfo": False,
             "create_wall_internal_h": False,
+            "create_wall_steel_plate_geometry": False,
             "create_connection_plate_geometry": False,
             "create_rebar_instances": False,
         },
@@ -408,16 +471,16 @@ def convert_ydb(source_path, destination_path):
     brace_segments_by_floor = _group_by(brace_segments, "StdFlrID")
     wall_segments_by_floor = _group_by(wall_segments, "StdFlrID")
 
-    pec_wall_boundary_nodes = set()
+    pec_main_wall_nodes = set()
     for segment in wall_segments:
         section = wall_sections.get(_value(segment, "SectID"))
-        if _section_kind(section) not in PEC_WALL_KINDS:
+        if _section_kind(section) != PEC_MAIN_WALL_KIND:
             continue
         standard_floor_id = _value(segment, "StdFlrID")
         grid = grid_for(standard_floor_id, _value(segment, "GridID"))
         if grid is not None:
-            pec_wall_boundary_nodes.add((standard_floor_id, _value(grid, "Jt1ID")))
-            pec_wall_boundary_nodes.add((standard_floor_id, _value(grid, "Jt2ID")))
+            pec_main_wall_nodes.add((standard_floor_id, _value(grid, "Jt1ID")))
+            pec_main_wall_nodes.add((standard_floor_id, _value(grid, "Jt2ID")))
 
     tbl1_rows = []
     for floor in floors:
@@ -480,16 +543,13 @@ def convert_ydb(source_path, destination_path):
             section = column_sections.get(_value(segment, "SectID"))
             kind = _section_kind(section)
             node_key = (standard_floor_id, _value(segment, "JtID"))
-            # YJK stores the ordinary Kind-2 H profiles at PEC wall endpoints
-            # in the column tables.  They are boundary steel belonging to the
-            # wall, not independent PEC columns.  Keep them available for
-            # WInfo.boundary_h below, but exclude them from tbl2 so Revit does
-            # not create duplicate column geometry.
-            if kind == 2 and node_key in pec_wall_boundary_nodes:
-                continue
+            # The Kind-2 H profiles at a main-wall endpoint are the two PEC end
+            # columns.  They are modeled independently as columns, while WInfo
+            # also references them to preserve the wall-to-column relationship.
+            is_pec_h = kind == 209 or (kind == 2 and node_key in pec_main_wall_nodes)
             section_text = (
                 _h_section_name(section, subsections.get(_value(segment, "SectID")), pec=True)
-                if kind == 209 else _legacy_section_text(section)
+                if is_pec_h else _legacy_section_text(section)
             )
             tbl2_rows.append((
                 _value(joint, "X"), _value(joint, "Y"), bottom_z,
@@ -613,13 +673,18 @@ def convert_ydb(source_path, destination_path):
                         "corner": corner,
                         "turn_sign": turn_sign,
                     })
+                secondary["connected_main_leg_id"] = main["leg_id"]
             else:
                 record = members[0]
                 record.update({
                     "shape": "I",
                     "group_id": group_id,
                     "leg_id": group_id + "-L1",
-                    "leg_role": "MAIN",
+                    "leg_role": (
+                        "SECONDARY"
+                        if record["kind"] == PEC_SECONDARY_WALL_KIND
+                        else "MAIN"
+                    ),
                 })
                 if record["kind"] == PEC_SECONDARY_WALL_KIND:
                     record["warning"] = "Kind 212 has no perpendicular Kind 211 partner; exported as I"
