@@ -27,7 +27,7 @@ from pathlib import Path
 PEC_WALL_KINDS = {211, 212}
 PEC_MAIN_WALL_KIND = 211
 PEC_SECONDARY_WALL_KIND = 212
-WINFO_VERSION = 2
+WINFO_VERSION = 3
 
 
 def _decode_sqlite_text(raw):
@@ -295,12 +295,38 @@ def _main_wall_steel_configuration(section, boundary_h):
 
 def _secondary_wall_steel_configuration(section, connected_main_leg_id, connected_h):
     connected = bool(connected_main_leg_id)
+    secondary_width = _value(section, "B")
+    alignment = {
+        "purpose": "ALIGN_ONE_H_FACE_WITH_SECONDARY_WALL_FACE",
+        "rule": "(MAIN_H_HEIGHT-SECONDARY_WIDTH)/2",
+        "main_h_height_mm": None,
+        "secondary_width_mm": secondary_width,
+        "expected_offset_magnitude_mm": None,
+        "actual_h_ecc_y_mm": None,
+        "verified_within_1mm": False,
+    }
+    if connected_h:
+        main_h_height = _value(connected_h[0], "height_mm")
+        actual_ecc_y = _value(connected_h[0], "ecc_y_mm")
+        if main_h_height is not None and secondary_width is not None:
+            expected_offset = (
+                _as_float(main_h_height) - _as_float(secondary_width)
+            ) / 2.0
+            alignment.update({
+                "main_h_height_mm": main_h_height,
+                "expected_offset_magnitude_mm": expected_offset,
+                "actual_h_ecc_y_mm": actual_ecc_y,
+                "verified_within_1mm": (
+                    actual_ecc_y is not None
+                    and abs(abs(_as_float(actual_ecc_y)) - abs(expected_offset)) <= 1.0
+                ),
+            })
     return {
         "component_role": "SECONDARY",
         "cross_section_form": "T",
         "web_thickness_mm": _value(section, "H"),
         "flange": {
-            "width_mm": _value(section, "Dis1"),
+            "width_mm": secondary_width,
             "thickness_mm": _value(section, "Dis"),
         },
         "has_own_end_h": False,
@@ -309,6 +335,7 @@ def _secondary_wall_steel_configuration(section, connected_main_leg_id, connecte
             "location": "start" if connected else None,
             "main_leg_id": connected_main_leg_id,
             "connected_main_h": connected_h if connected else [],
+            "alignment": alignment,
         },
     }
 

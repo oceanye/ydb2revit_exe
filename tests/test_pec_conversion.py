@@ -172,7 +172,7 @@ class PecConversionTests(unittest.TestCase):
         self.assertEqual(212, infos[1]["section_parameters"]["Kind"])
         self.assertEqual(150.0, infos[1]["section_parameters"]["Dis1"])
         self.assertEqual("H244x175x8x12", infos[0]["boundary_h"]["start"][0]["section"])
-        self.assertEqual(2, infos[0]["version"])
+        self.assertEqual(3, infos[0]["version"])
         main_steel = infos[0]["steel_configuration"]
         self.assertEqual("I", main_steel["cross_section_form"])
         self.assertEqual(6.0, main_steel["web_thickness_mm"])
@@ -183,11 +183,17 @@ class PecConversionTests(unittest.TestCase):
         secondary_steel = infos[1]["steel_configuration"]
         self.assertEqual("T", secondary_steel["cross_section_form"])
         self.assertEqual(8.0, secondary_steel["web_thickness_mm"])
-        self.assertEqual(150.0, secondary_steel["flange"]["width_mm"])
+        self.assertEqual(175.0, secondary_steel["flange"]["width_mm"])
         self.assertEqual(20.0, secondary_steel["flange"]["thickness_mm"])
         self.assertFalse(secondary_steel["has_own_end_h"])
         self.assertEqual("PECW0001-L1", secondary_steel["tail_connection"]["main_leg_id"])
         self.assertEqual("TAIL_TO_MAIN_H", secondary_steel["tail_connection"]["type"])
+        alignment = secondary_steel["tail_connection"]["alignment"]
+        self.assertEqual(244.0, alignment["main_h_height_mm"])
+        self.assertEqual(175.0, alignment["secondary_width_mm"])
+        self.assertEqual(34.5, alignment["expected_offset_magnitude_mm"])
+        self.assertEqual(-35, alignment["actual_h_ecc_y_mm"])
+        self.assertTrue(alignment["verified_within_1mm"])
         self.assertEqual({"start": [], "end": []}, infos[1]["boundary_h"])
         self.assertTrue(infos[0]["modeling"]["boundary_h_columns_are_in_tbl2"])
         self.assertFalse(infos[1]["modeling"]["boundary_h_columns_are_in_tbl2"])
@@ -200,6 +206,19 @@ class PecConversionTests(unittest.TestCase):
             config = CONVERTER._main_wall_steel_configuration(section, boundary_h)
             self.assertEqual(partitions, config["partition_count"])
             self.assertEqual(stiffeners, config["internal_stiffener"]["count"])
+
+    def test_secondary_flange_and_flush_alignment_mapping(self):
+        section = {"B": 300, "H": 12, "Dis": 14, "Dis1": 150}
+        connected_h = [{"height_mm": 600, "ecc_y_mm": -150}]
+        config = CONVERTER._secondary_wall_steel_configuration(
+            section, "PECW0002-L1", connected_h
+        )
+        self.assertEqual(300, config["flange"]["width_mm"])
+        self.assertEqual(14, config["flange"]["thickness_mm"])
+        alignment = config["tail_connection"]["alignment"]
+        self.assertEqual(150.0, alignment["expected_offset_magnitude_mm"])
+        self.assertEqual(-150, alignment["actual_h_ecc_y_mm"])
+        self.assertTrue(alignment["verified_within_1mm"])
 
     def test_true_standalone_pec_column_still_uses_h_suffix(self):
         source = Path(self.temp_dir.name) / "standalone_pec_column.ydb"
