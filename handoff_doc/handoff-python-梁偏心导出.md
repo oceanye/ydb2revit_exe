@@ -95,13 +95,16 @@ for i in range(0, len(bstartx)):
 sql_insert = "INSERT INTO tbl1(BStartX,BStartY,BStartZ,BEndX,BEndY,BEndZ,BSection,Tag,ID,RvtID,BSConn,BEConn,Ecc,Ecc2,BRotation) VALUES"
 ```
 
-**(f) CombineBeam 建表（798–809）加一列 `Ecc`（仅 schema，数据由 C# 写）**
+**(f) `CombineBeam` 由 Revit 端维护，不属于 Python 重建范围**
 ```sql
     ShapeValue    TEXT,
     Info          TEXT,
     Ecc           TEXT);
 ```
-> 说明：`CombineBeam` 表由 Python 建空表、由 C# 端（`CombineBeam.cs` 的 `WriteDb`）写数据。Python 只需把列建出来即可，**不要**在 Python 里给它插梁偏心。
+> 最新统一数据库安全契约规定 Python 上部提取只能重建 `tbl1～tbl4`。
+> 因此 Python 不再创建、删除或迁移 `CombineBeam`；已有表必须原样保留。
+> 新数据库缺少该表时，由 Revit C# 端在首次执行 `CombineBeam` 时创建并负责
+> `Ecc` 列迁移，Python 不向其中插入数据。
 
 ## 5. 待 Python 团队确认的问题
 1. **Ecc vs Ecc2**：是否分别 = 起点端 / 终点端偏心？现有模型恒等，无法区分。请对照 YJK 字段文档，或做一个"两端偏心不同"的测试梁验证。若确为两端值，C# 端会分别施加到梁起/终点。
@@ -111,7 +114,8 @@ sql_insert = "INSERT INTO tbl1(BStartX,BStartY,BStartZ,BEndX,BEndY,BEndZ,BSectio
 ## 6. 验收标准
 - 转换后 `ydb转换数据库.db` 的 `tbl1` 应含 `Ecc, Ecc2, BRotation` 三列且在末尾。
 - 用 `5#宿舍楼-钢框架 test.ydb` 转换后：`SELECT * FROM tbl1 WHERE Ecc<>0` 应返回 **2 行**，`Ecc` 分别为 `25` 和 `-23`。
-- `CombineBeam` 表应含 `Ecc` 列（空表即可）。
+- 若已有 `CombineBeam` 表，Python 转换前后其 schema 和记录必须完全不变。
+- 新库的 `CombineBeam.Ecc` 建表/迁移由 Revit C# 端验收。
 - 前 12 列布局不变（回归：C# 端 `CombineBeam.cs` 仍能正常合并梁）。
 
 ## 7. 参考（背景定义）

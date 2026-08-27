@@ -27,10 +27,13 @@ Python 实现：`ydb转换.py`
 ## 2. Python 使用方式
 
 ```powershell
-python .\ydb转换.py C:\path\to\dtlmodel.ydb -o C:\temp\ydb转换数据库.db
+python .\ydb转换.py C:\path\to\dtlmodel.ydb `
+  -o C:\temp\ydb转换数据库.db --mode upper
 ```
 
 不指定 `-o` 时沿用原有默认数据库位置；双击 EXE 时使用 Windows 原生文件选择框。
+Revit 或批处理调用必须显式传 `--mode upper`，误选基础 YDB 时在修改正式库前
+返回机器可读错误。上部提取只重建 `tbl1～tbl4`，其他表由暂存库范围指纹保护。
 
 ## 3. 梁柱表契约
 

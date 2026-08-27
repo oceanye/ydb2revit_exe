@@ -23,6 +23,9 @@ import math
 import sqlite3
 from pathlib import Path
 
+from foundation_handoff import convert_foundation_ydb, is_foundation_ydb
+from handoff_atomic import UPPER_MODE, atomic_update_database
+
 
 PEC_WALL_KINDS = {211, 212}
 PEC_MAIN_WALL_KIND = 211
@@ -336,32 +339,8 @@ def _build_wall_info(record, wall_h_column_ids_by_node):
     )
 
 
-def _copy_table(source, destination, table_name):
-    destination.execute("DROP TABLE IF EXISTS " + _quote_identifier(table_name))
-    if not _table_exists(source, table_name):
-        return 0
-    info = list(source.execute("PRAGMA table_info(" + _quote_identifier(table_name) + ")"))
-    if not info:
-        return 0
-    definitions = []
-    for column in info:
-        definitions.append(_quote_identifier(column[1]) + " " + (column[2] or "TEXT"))
-    destination.execute(
-        "CREATE TABLE " + _quote_identifier(table_name) + " (" + ",".join(definitions) + ")"
-    )
-    rows = list(source.execute("SELECT * FROM " + _quote_identifier(table_name)))
-    if rows:
-        column_names = [_quote_identifier(column[1]) for column in info]
-        placeholders = ",".join("?" for _ in info)
-        destination.executemany(
-            "INSERT INTO " + _quote_identifier(table_name)
-            + " (" + ",".join(column_names) + ") VALUES (" + placeholders + ")",
-            [tuple(row) for row in rows],
-        )
-    return len(rows)
-
-
-def convert_ydb(source_path, destination_path):
+def _convert_ydb_in_place(source_path, destination_path):
+    """Write upper-structure tables into an already isolated staging database."""
     source_path = Path(source_path).expanduser().resolve()
     destination_path = Path(destination_path).expanduser().resolve()
     if not source_path.is_file():
@@ -370,7 +349,7 @@ def convert_ydb(source_path, destination_path):
         raise ValueError("Source YDB and destination database must be different files")
 
     destination_path.parent.mkdir(parents=True, exist_ok=True)
-    source = sqlite3.connect(str(source_path))
+    source = sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True)
     source.row_factory = sqlite3.Row
     source.text_factory = _decode_sqlite_text
 
@@ -680,8 +659,6 @@ def convert_ydb(source_path, destination_path):
     destination = sqlite3.connect(str(destination_path))
     try:
         with destination:
-            copied_subsections = _copy_table(source, destination, "tblSubSectionSect")
-
             destination.execute("DROP TABLE IF EXISTS tbl1")
             destination.execute("""
                 CREATE TABLE tbl1 (
@@ -715,15 +692,6 @@ def convert_ydb(source_path, destination_path):
             destination.execute("CREATE TABLE tbl3 (Floor TEXT, LevelB REAL)")
             destination.executemany("INSERT INTO tbl3 VALUES (?,?)", tbl3_rows)
 
-            destination.execute("DROP TABLE IF EXISTS CombineBeam")
-            destination.execute("""
-                CREATE TABLE CombineBeam (
-                    id TEXT, StartX TEXT, StartY TEXT, StartZ TEXT,
-                    EndX TEXT, EndY TEXT, EndZ TEXT,
-                    ShapeValue TEXT, Info TEXT, Ecc TEXT
-                )
-            """)
-
             destination.execute("DROP TABLE IF EXISTS tbl4")
             destination.execute("""
                 CREATE TABLE tbl4 (
@@ -744,7 +712,6 @@ def convert_ydb(source_path, destination_path):
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_tbl4_leg "
                 "ON tbl4(WLegID) WHERE WLegID IS NOT NULL"
             )
-            destination.execute("PRAGMA user_version = 2")
     finally:
         destination.close()
         source.close()
@@ -757,8 +724,44 @@ def convert_ydb(source_path, destination_path):
         "levels": len(tbl3_rows),
         "wall_legs": len(tbl4_rows),
         "pec_wall_groups": group_counter,
-        "copied_subsections": copied_subsections,
     }
+
+
+def convert_ydb(source_path, destination_path):
+    """Atomically rebuild tbl1-tbl4 while preserving every other database object."""
+    source_path = Path(source_path).expanduser().resolve()
+    destination_path = Path(destination_path).expanduser().resolve()
+    if not source_path.is_file():
+        raise FileNotFoundError("YDB file does not exist: " + str(source_path))
+    if source_path == destination_path:
+        raise ValueError("Source YDB and destination database must be different files")
+    return atomic_update_database(
+        destination_path,
+        UPPER_MODE,
+        lambda pending_path: _convert_ydb_in_place(source_path, pending_path),
+    )
+
+
+def resolve_source_mode(source_path, requested_mode="auto"):
+    """Resolve and validate the caller's expected source kind before any DB write."""
+    if requested_mode not in ("auto", "upper", "foundation"):
+        raise ValueError("unknown conversion mode: " + str(requested_mode))
+    detected_mode = "foundation" if is_foundation_ydb(source_path) else "upper"
+    if requested_mode != "auto" and requested_mode != detected_mode:
+        raise ValueError(
+            "source mode mismatch: expected {}, detected {}".format(
+                requested_mode, detected_mode
+            )
+        )
+    return detected_mode
+
+
+def convert_auto_ydb(source_path, destination_path, mode="auto"):
+    """Route a validated source without allowing upper/foundation scope mixing."""
+    resolved_mode = resolve_source_mode(source_path, mode)
+    if resolved_mode == "foundation":
+        return convert_foundation_ydb(source_path, destination_path)
+    return convert_ydb(source_path, destination_path)
 
 
 def _default_destination():
@@ -819,19 +822,69 @@ def _choose_source_file():
     return ""
 
 
+def _print_machine_result(payload):
+    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Convert a YJK ydb file to the Revit handoff database")
     parser.add_argument("source", nargs="?", help="input .ydb file; omit to use the file chooser")
     parser.add_argument("-o", "--output", help="destination SQLite database")
+    parser.add_argument(
+        "--mode",
+        choices=("auto", "upper", "foundation"),
+        default="auto",
+        help="expected source scope; use upper/foundation for caller-side safety",
+    )
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="open the local reinforcement editor after extracting a foundation YDB",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help=argparse.SUPPRESS)
+    parser.add_argument("--port", type=int, default=8765, help="local web editor port")
+    parser.add_argument("--no-browser", action="store_true", help="do not open a browser automatically")
     args = parser.parse_args(argv)
 
     source_path = args.source or _choose_source_file()
     if not source_path:
-        print("No YDB file selected")
-        return 1
+        _print_machine_result({
+            "mode": args.mode,
+            "status": "cancelled",
+            "error": "no YDB file selected",
+        })
+        return 2
     destination_path = args.output or str(_default_destination())
-    summary = convert_ydb(source_path, destination_path)
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    resolved_mode = None
+    try:
+        resolved_mode = resolve_source_mode(source_path, args.mode)
+        if args.web and resolved_mode != "foundation":
+            raise ValueError("--web is only available for a foundation YDB")
+        summary = convert_auto_ydb(
+            source_path,
+            destination_path,
+            mode=resolved_mode,
+        )
+    except Exception as error:
+        _print_machine_result({
+            "mode": resolved_mode or args.mode,
+            "status": "error",
+            "source": str(Path(source_path).expanduser()),
+            "destination": str(Path(destination_path).expanduser()),
+            "error_type": type(error).__name__,
+            "error": str(error),
+        })
+        return 1
+
+    _print_machine_result(summary)
+    if args.web:
+        from foundation_web import serve_foundation_editor
+        serve_foundation_editor(
+            destination_path,
+            host=args.host,
+            port=args.port,
+            open_browser=not args.no_browser,
+        )
     return 0
 
 
