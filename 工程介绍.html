@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ydb2revit_exe 工程介绍 · YJK → Revit 数据转换中枢</title>
+<style>
+/* ---------- 设计令牌（浅色 / 深色） ---------- */
+:root {
+  color-scheme: light;
+  --page:      #f9f9f7;
+  --surface:   #fcfcfb;
+  --ink:       #0b0b0b;
+  --ink-2:     #52514e;
+  --muted:     #898781;
+  --grid:      #e1e0d9;
+  --baseline:  #c3c2b7;
+  --border:    rgba(11,11,11,.10);
+  --accent:    #2a78d6;   /* 分类槽 1 · 蓝 = 上部结构 */
+  --accent-2:  #eb6834;   /* 分类槽 2 · 橙 = 基础 */
+  --good:      #0ca30c;
+  --warn:      #fab219;
+  --serious:   #ec835a;
+  --wash:      rgba(42,120,214,.08);
+  --wash-2:    rgba(235,104,52,.08);
+  --code-bg:   rgba(11,11,11,.05);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page:      #0d0d0d;
+    --surface:   #1a1a19;
+    --ink:       #ffffff;
+    --ink-2:     #c3c2b7;
+    --muted:     #898781;
+    --grid:      #2c2c2a;
+    --baseline:  #383835;
+    --border:    rgba(255,255,255,.10);
+    --accent:    #3987e5;
+    --accent-2:  #d95926;
+    --good:      #0ca30c;
+    --warn:      #fab219;
+    --serious:   #ec835a;
+    --wash:      rgba(57,135,229,.14);
+    --wash-2:    rgba(217,89,38,.14);
+    --code-bg:   rgba(255,255,255,.07);
+  }
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--page); color: var(--ink);
+  font: 15px/1.75 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* ---------- 页头 ---------- */
+header.hero {
+  background: linear-gradient(135deg, #102c29, #14433d);
+  color: #fff; padding: 44px max(24px, calc((100% - 1280px)/2)) 38px;
+}
+header.hero h1 { margin: 0 0 6px; font-size: 27px; letter-spacing: .5px; }
+header.hero .sub { color: #c8ded9; font-size: 14.5px; margin: 0 0 14px; }
+header.hero .meta { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 12.5px; color: #9fc4bd; }
+header.hero .meta span::before { content: "·"; margin-right: 7px; color: #4e7a72; }
+header.hero .meta span:first-child::before { content: ""; margin: 0; }
+
+/* ---------- 布局 ---------- */
+.layout {
+  display: grid; grid-template-columns: 212px minmax(0,1fr); gap: 36px;
+  max-width: 1280px; margin: 0 auto; padding: 30px 24px 80px;
+}
+nav.toc { position: sticky; top: 18px; align-self: start; font-size: 13.5px; }
+nav.toc .toc-title { color: var(--muted); font-size: 12px; letter-spacing: 2px; margin-bottom: 10px; }
+nav.toc a {
+  display: block; color: var(--ink-2); text-decoration: none;
+  padding: 5px 10px; border-left: 2px solid var(--grid); border-radius: 0 6px 6px 0;
+}
+nav.toc a:hover { color: var(--ink); background: var(--wash); }
+nav.toc a.on { color: var(--accent); border-left-color: var(--accent); font-weight: 600; }
+nav.toc a b { color: var(--muted); font-weight: 400; margin-right: 7px; font-variant-numeric: tabular-nums; }
+nav.toc a.on b { color: var(--accent); }
+main { min-width: 0; }
+
+section { margin: 0 0 52px; scroll-margin-top: 16px; }
+h2 {
+  display: flex; align-items: baseline; gap: 12px;
+  font-size: 21px; margin: 0 0 18px; padding-bottom: 10px; border-bottom: 1px solid var(--grid);
+}
+h2 .no { color: var(--accent); font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: 1px; }
+h3 { font-size: 16.5px; margin: 30px 0 10px; }
+h3 .fh { color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 8px; }
+p { margin: 10px 0; color: var(--ink-2); }
+p strong, li strong { color: var(--ink); }
+ul, ol { margin: 10px 0; padding-left: 22px; color: var(--ink-2); }
+li { margin: 4px 0; }
+a { color: var(--accent); }
+
+/* ---------- 统计卡片 ---------- */
+.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 12px; margin: 20px 0 8px; }
+.stat { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.stat .v { font-size: 27px; font-weight: 600; line-height: 1.25; }
+.stat .v small { font-size: 13px; font-weight: 400; color: var(--muted); margin-left: 3px; }
+.stat .l { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+
+/* ---------- 徽章（圆点 + 文字，不靠颜色单独传义） ---------- */
+.badge {
+  display: inline-flex; align-items: center; gap: 7px; font-size: 12px; line-height: 1.6;
+  padding: 1px 11px 1px 9px; border-radius: 999px; border: 1px solid var(--border);
+  color: var(--ink-2); background: var(--surface); white-space: nowrap;
+}
+.badge::before { content: ""; width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.b-good::before    { background: var(--good); }
+.b-warn::before    { background: var(--warn); }
+.b-serious::before { background: var(--serious); }
+
+/* ---------- 表格 ---------- */
+table.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; margin: 12px 0 6px; }
+.tbl th {
+  text-align: left; font-weight: 600; color: var(--muted); font-size: 12.5px;
+  padding: 6px 10px; border-bottom: 1.5px solid var(--baseline); white-space: nowrap;
+}
+.tbl td { padding: 7px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; color: var(--ink-2); }
+.tbl td:first-child code { color: var(--ink); }
+.tbl tr:last-child td { border-bottom: none; }
+.tbl .ctr { text-align: center; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tbl-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 6px 8px; overflow-x: auto; }
+
+/* ---------- 代码 ---------- */
+code {
+  font-family: Consolas, "Cascadia Mono", Menlo, monospace; font-size: .92em;
+  background: var(--code-bg); border-radius: 4px; padding: 1px 5px; color: var(--ink);
+}
+pre {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 9px;
+  padding: 13px 15px; overflow-x: auto; margin: 12px 0;
+  font: 12.5px/1.68 Consolas, "Cascadia Mono", Menlo, monospace; color: var(--ink-2);
+}
+pre b { color: var(--ink); font-weight: 600; }
+pre i { color: var(--muted); font-style: normal; }
+pre .cmt { color: var(--muted); }
+
+/* ---------- 流程图 ---------- */
+.flow { display: flex; flex-direction: column; align-items: center; margin: 18px 0; }
+.flow-row { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; width: 100%; }
+.fbox {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 11px 20px; text-align: center; min-width: 190px;
+}
+.fbox .t { font-weight: 600; font-size: 14.5px; }
+.fbox .d { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.fbox.src-Upper { border-top: 3px solid var(--accent); }
+.fbox.src-Found { border-top: 3px solid var(--accent-2); }
+.farrow { color: var(--muted); font-size: 12.5px; padding: 7px 0; display: flex; align-items: center; gap: 9px; }
+.farrow .glyph { color: var(--baseline); font-size: 16px; line-height: 1; }
+.dbbox {
+  background: var(--surface); border: 1.5px solid var(--baseline); border-radius: 12px;
+  padding: 14px 22px 16px; width: min(640px, 100%); text-align: center;
+}
+.dbbox .t { font-weight: 700; font-size: 15.5px; }
+.dbbox .guard { margin-top: 9px; font-size: 12px; color: var(--muted); border-top: 1px dashed var(--grid); padding-top: 8px; }
+.tgroup { display: flex; gap: 26px; justify-content: center; flex-wrap: wrap; margin-top: 12px; text-align: left; }
+.tgroup .gt { font-size: 11.5px; color: var(--muted); margin-bottom: 6px; letter-spacing: 1px; }
+.chips { display: flex; flex-wrap: wrap; gap: 7px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border);
+  border-radius: 999px; padding: 2px 11px; font-size: 12.5px; font-family: Consolas, monospace;
+  background: var(--page);
+}
+.chip i { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.c-Upper i { background: var(--accent); }   .c-Upper { background: var(--wash); }
+.c-Found i { background: var(--accent-2); } .c-Found { background: var(--wash-2); }
+.c-Meta  i { background: var(--muted); }
+
+/* ---------- 目录树 / 其他 ---------- */
+.tree { line-height: 1.85; }
+.note {
+  background: var(--wash); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: 0 9px 9px 0; padding: 10px 16px; margin: 14px 0; font-size: 13.5px; color: var(--ink-2);
+}
+.note.orange { background: var(--wash-2); border-left-color: var(--accent-2); }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+footer {
+  border-top: 1px solid var(--grid); color: var(--muted); font-size: 12.5px;
+  padding: 18px 24px 40px; max-width: 1280px; margin: 0 auto;
+}
+
+/* ---------- 响应式 / 打印 ---------- */
+@media (max-width: 960px) {
+  .layout { grid-template-columns: 1fr; gap: 8px; }
+  nav.toc { position: static; display: flex; flex-wrap: wrap; gap: 4px; }
+  nav.toc .toc-title { width: 100%; }
+  nav.toc a { border-left: none; border: 1px solid var(--grid); border-radius: 999px; padding: 3px 11px; }
+  .grid2 { grid-template-columns: 1fr; }
+}
+@media print {
+  nav.toc, header.hero .meta { display: none; }
+  .layout { grid-template-columns: 1fr; padding: 0; }
+  body { background: #fff; }
+  pre, .fbox, .dbbox, .stat, .tbl-wrap { break-inside: avoid; }
+}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <h1>ydb2revit_exe · YJK → Revit 数据转换中枢</h1>
+  <p class="sub">解析盈建科 .ydb（SQLite），重组为统一中间数据库 <code style="background:rgba(255,255,255,.12);color:#dff3ef">ydb转换数据库.db</code>，供 Revit C# 插件读取建模 · 纯 Python 标准库 · 零第三方依赖</p>
+  <div class="meta">
+    <span>仓库 http://10.26.0.176:3000/yf/ydb2revit_exe.git</span>
+    <span>Python 3.13（仅标准库）</span>
+    <span>打包 PyInstaller → dist\ydb转换.exe</span>
+    <span>文档生成 2026-08-27</span>
+  </div>
+</header>
+
+<div class="layout">
+<nav class="toc" id="toc">
+  <div class="toc-title">目录</div>
+  <a href="#s1"><b>01</b>项目定位</a>
+  <a href="#s2"><b>02</b>数据流架构</a>
+  <a href="#s3"><b>03</b>目录结构</a>
+  <a href="#s4"><b>04</b>核心模块</a>
+  <a href="#s5"><b>05</b>数据契约</a>
+  <a href="#s6"><b>06</b>使用方式</a>
+  <a href="#s7"><b>07</b>样本验证</a>
+  <a href="#s8"><b>08</b>路线图</a>
+</nav>
+
+<main>
+
+<!-- ========== 01 项目定位 ========== -->
+<section id="s1">
+  <h2><span class="no">01</span>项目定位</h2>
+  <p>YJK 的 <code>.ydb</code> 文件本质是<strong>未加密的 SQLite 数据库</strong>。本工程把它解析、净化、重组为一份<strong>统一中间数据库</strong>，
+  上部结构与基础写入同一份库，由下游 C# Revit 插件（<code>CombineBeam</code>、<code>CreateNewExtern</code> 等）读取并生成模型。</p>
+
+  <div class="stat-row">
+    <div class="stat"><div class="v">7<small>张</small></div><div class="l">中间数据表 tbl1–tbl7</div></div>
+    <div class="stat"><div class="v">31<small>个</small></div><div class="l">回归测试 · 全部通过</div></div>
+    <div class="stat"><div class="v">3,043<small>行</small></div><div class="l">Python 主代码（另含 1,010 行测试）</div></div>
+    <div class="stat"><div class="v">5<small>份</small></div><div class="l">跨端交接协议文档</div></div>
+    <div class="stat"><div class="v">0<small>个</small></div><div class="l">第三方运行时依赖</div></div>
+  </div>
+
+  <h3>三条强制边界（全链路适用）</h3>
+  <ul>
+    <li><strong>只读 YDB，绝不读 DWG</strong> —— DWG 仅用于人工验证，不得向中间库反向补齐任何字段。</li>
+    <li><strong>配筋不从 YDB 提取</strong> —— 由本机网页（<code>foundation_web.py</code>）按型号人工补录。</li>
+    <li><strong>单位统一 mm / 度</strong> —— 英尺换算与符号对齐由 Revit C# 端负责，Python 原样透传。</li>
+  </ul>
+
+  <div class="note">列顺序即契约：<code>tbl1–tbl7</code> 的现有列是与 C# 端的<strong>固定兼容接口</strong>（C# 按下标读取），
+  后续只允许在<strong>表尾追加</strong>双方确认的新列，不得插入、删除或调整顺序。</div>
+</section>
+
+<!-- ========== 02 数据流架构 ========== -->
+<section id="s2">
+  <h2><span class="no">02</span>数据流架构</h2>
+
+  <div class="flow">
+    <div class="flow-row">
+      <div class="fbox src-Upper"><div class="t">上部结构 ydb</div><div class="d">dtlmodel*.ydb · 梁/柱/撑/墙/楼层</div></div>
+      <div class="fbox src-Found"><div class="t">基础 jccad.ydb</div><div class="d">承台 · 桩 · 布置</div></div>
+    </div>
+    <div class="farrow"><span class="glyph">↓</span> <code>--mode upper</code> 自动识别：按必备表探测（foundation_handoff.py:107）</div>
+    <div class="farrow"><span class="glyph">↓</span> <code>--mode foundation</code>　误选模式在写库前报机器可读错误</div>
+    <div class="dbbox">
+      <div class="t">统一中间数据库 · ydb转换数据库.db</div>
+      <div class="tgroup">
+        <div><div class="gt">上部结构（upper 模式重建）</div>
+          <div class="chips">
+            <span class="chip c-Upper"><i></i>tbl1 梁+撑</span>
+            <span class="chip c-Upper"><i></i>tbl2 柱</span>
+            <span class="chip c-Upper"><i></i>tbl3 楼层</span>
+            <span class="chip c-Upper"><i></i>tbl4 墙肢</span>
+          </div>
+        </div>
+        <div><div class="gt">基础（foundation 模式重建）</div>
+          <div class="chips">
+            <span class="chip c-Found"><i></i>tbl5 桩型号</span>
+            <span class="chip c-Found"><i></i>tbl6 承台型号</span>
+            <span class="chip c-Found"><i></i>tbl7 承台布置</span>
+          </div>
+        </div>
+        <div><div class="gt">元数据</div>
+          <div class="chips"><span class="chip c-Meta"><i></i>handoff_meta</span></div>
+        </div>
+      </div>
+      <div class="guard">写入保护：<code>handoff_atomic.py</code> —— .pending 暂存库 · SHA-256 范围指纹 · integrity_check · 原子替换<br>
+      上部提取绝不触碰 tbl5–tbl7 与 Foundation.* 元数据；基础提取绝不触碰 tbl1–tbl4</div>
+    </div>
+    <div class="flow-row">
+      <div class="farrow"><span class="glyph">↓</span> 只读建模</div>
+      <div class="farrow"><span class="glyph">↕</span> 补录写回 tbl5 / tbl6 配筋字段</div>
+    </div>
+    <div class="flow-row">
+      <div class="fbox"><div class="t">Revit C# 插件</div><div class="d">CombineBeam / SqliteDataToRevit 等<br>读 tbl1–tbl7 生成模型并回写 RvtID</div></div>
+      <div class="fbox"><div class="t">foundation_web.py</div><div class="d">本机 127.0.0.1 网页补录<br>一次性令牌 · 无 CDN · 无外网</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ========== 03 目录结构 ========== -->
+<section id="s3">
+  <h2><span class="no">03</span>目录结构</h2>
+<pre class="tree">E:\ydb2revit_exe\
+├── <b>ydb转换.py</b>            <span class="cmt">★ 主转换器 + CLI 入口（892 行）：上部结构 → tbl1–tbl4</span>
+├── <b>foundation_handoff.py</b>  基础承台/桩提取（871 行）→ tbl5–tbl7 + 配筋恢复
+├── <b>handoff_atomic.py</b>      中间库原子安全更新（367 行）：范围指纹 / 并发防护
+├── <b>foundation_web.py</b>      本机配筋补录 Web 服务器（287 行，单文件零依赖）
+├── ydb转换.spec                PyInstaller 打包配置 → dist\ydb转换.exe
+│
+├── handoff_doc\                <span class="cmt">5 份跨端交接协议文档（Markdown）</span>
+│   ├── YJK坐标系与梁柱偏心定义.md              <span class="cmt">坐标系 / 偏心语义基准</span>
+│   ├── handoff-python-PEC墙提取与Revit建模.md   <span class="cmt">WInfo v4 协议（更新 2026-08-26）</span>
+│   ├── handoff-python-基础承台桩提取与配筋补录.md
+│   ├── handoff-python-梁偏心导出.md
+│   └── handoff-Revit-结构信息录入与模型同步.md   <span class="cmt">未来同步功能总规划（A–D 阶段）</span>
+│
+├── tools\
+│   └── export_pec_wall_check_dxf.py   PEC 墙参数核对 DXF 导出（626 行）
+├── tests\                      31 个回归测试（unittest · 2.4s 全过）
+│   ├── test_pec_conversion.py      PEC 墙 / 截面 / 楼层引用（18 例）
+│   ├── test_foundation_handoff.py  基础提取 / 归并 / Web API（12 例）
+│   └── test_atomic_handoff.py      原子更新 / 范围保护（4 例）
+│
+├── PEC剪力墙测试\              dtlmodel_PECWall.ydb + L+1.dxf 测试样本
+├── 基础部分模型\                jccad.ydb + foundation_handoff.db 样本
+├── 施工图-墙\                  dtlmodelsw.ydb / dtlmodelww.ydb 样本
+├── validation_output\          核对产物：PEC墙参数测量核对 .dxf / .png / _v4.db
+├── build\ · dist\              PyInstaller 中间产物与 ydb转换.exe
+└── .idea\                      PyCharm 工程配置</pre>
+</section>
+
+<!-- ========== 04 核心模块 ========== -->
+<section id="s4">
+  <h2><span class="no">04</span>核心模块详解</h2>
+
+  <h3>4.1 主转换器 <span class="fh">ydb转换.py · 892 行</span></h3>
+  <p>CLI 入口 <code>main()</code>（<code>ydb转换.py:829</code>）→ <code>convert_auto_ydb()</code> 按表结构自动分流上部/基础 → <code>_convert_ydb_in_place()</code>（<code>ydb转换.py:342</code>）执行提取。
+  文本解码自动兼容 UTF-8 / gb18030 / gbk。</p>
+  <div class="tbl-wrap"><table class="tbl">
+    <tr><th>关键函数</th><th class="ctr">行号</th><th>职责</th></tr>
+    <tr><td><code>_h_dimensions</code></td><td class="ctr">139</td><td>PEC 截面归一：Kind 209 用 <code>u/t/d/f</code>、Kind 2 用 <code>b/h/u/t</code>，字段名完全不同，统一输出 <code>H{h}x{b}x{tw}x{tf}@PEC</code></td></tr>
+    <tr><td><code>_connection_values</code></td><td class="ctr">187</td><td>读 <code>tblProperty.SpBeam</code> 梁端连接属性，<code>3.00</code> 视为 0</td></tr>
+    <tr><td><code>_build_wall_info</code></td><td class="ctr">283</td><td>组装 WInfo v4 JSON：tbl2 柱引用 + 钢构参数 + 原始字段透传</td></tr>
+    <tr><td><code>_main/_secondary_wall_steel_configuration</code></td><td class="ctr">256 / 270</td><td>Main 墙 I 形钢构（腹板厚、区隔数 = T2+3、加劲板）；Secondary 墙 T 形钢构（腹板/翼缘厚）</td></tr>
+    <tr><td>L/I 墙分组循环</td><td class="ctr">562–634</td><td>Kind 211(Main)+212(Secondary) 按「共享节点 + 垂直评分 ≤ 0.05」配对成 L 组；未配对导出为 I 并附 warning；编号 <code>PECW0001</code></td></tr>
+    <tr><td><code>_orient_from_corner</code></td><td class="ctr">244</td><td>L 墙两肢统一「从公共角点指向外端」输出，使 Revit 端公式无需符号分支</td></tr>
+    <tr><td>墙端 H 柱识别</td><td class="ctr">402–511</td><td>位于 PEC 主墙端点的普通 Kind-2 H 柱 → 独立 tbl2 行，但 EccX/EccY/Rotation <strong>归零</strong>，定位改由墙几何推导</td></tr>
+    <tr><td><code>_choose_source_file</code></td><td class="ctr">774</td><td>ctypes 调 Win32 原生文件选择框（无 Tk 依赖，供双击 EXE 使用）</td></tr>
+  </table></div>
+
+  <h3>4.2 基础提取 <span class="fh">foundation_handoff.py · 871 行</span></h3>
+  <ul>
+    <li><strong>模式识别</strong>：<code>is_foundation_ydb()</code>（:107）探测 7 张必备表（<code>DEF_dais / app_dais / dais_pt / dais_stepH / DEF_Pile / app_Pile / node</code>）。</li>
+    <li><strong>型号归并</strong>：桩型号 = 直径+长度 → <code>PILE-&lt;16位SHA256&gt;</code>；承台型号 = 多边形+厚度+完整局部桩位 → <code>CAP-&lt;16位SHA256&gt;</code>。几何规范化（<code>_canonical_cap_model</code> :190）忽略起始顶点 / 绕向 / 平移 / 旋转，镜像不归并。</li>
+    <li><strong>配筋保护</strong>：重建前快照 tbl5/tbl6 配筋字段，按未变化的 TypeKey 恢复（<code>_snapshot_rebar</code> :311 / <code>_restored_rebar</code> :342）——重新提取不丢人工录入。</li>
+    <li><strong>显式拒绝</strong>（抛 <code>FoundationDataError</code>，不静默猜测）：多阶/圆形承台、斜桩、矩形桩、独立桩、相对标高、声明桩数与模板不符。</li>
+    <li><strong>单位换算</strong>：<code>dBotElevat×1000</code>（m→mm）、<code>ang</code> 弧度→度；<code>app_dais.nj</code> 零基 → <code>node.ID</code> 一基需 +1。</li>
+  </ul>
+
+  <h3>4.3 原子安全更新 <span class="fh">handoff_atomic.py · 367 行</span></h3>
+  <p>所有对正式库的写入都经 <code>atomic_update_database()</code>（<code>handoff_atomic.py:271</code>），五道关卡：</p>
+  <ol>
+    <li>正式库同目录创建唯一 <code>.pending-*</code> 暂存库，SQLite backup API 一致性快照；</li>
+    <li><strong>三重哈希防并发</strong>：快照前后 + 暂存基线的全库 SHA-256 必须一致，否则 <code>ConcurrentUpdateError</code>；</li>
+    <li>writer 只写暂存库 → <code>PRAGMA integrity_check</code>；</li>
+    <li><strong>范围指纹</strong>：对「非目标表 + 受保护元数据」逐行哈希比对，任何越界改动抛 <code>ScopeViolationError</code>；upper 模式额外对 tbl5–tbl7 + Foundation.* 计算 <code>foundation_contract_sha256</code>；</li>
+    <li>复核正式库未变、无活动 WAL sidecar → <code>os.replace</code> 原子替换；失败只清理暂存文件，正式库分毫不动。</li>
+  </ol>
+
+  <h3>4.4 配筋补录网页 <span class="fh">foundation_web.py · 287 行</span></h3>
+  <p><code>serve_foundation_editor()</code>（:248）：单文件 HTTP 服务，HTML/CSS/JS 全部内嵌，无 CDN、无外网请求、无文件上传。仅绑定 <code>127.0.0.1:8765</code>，启动时生成一次性 URL 令牌（<code>secrets.compare_digest</code> 校验），响应带 CSP / nosniff 安全头。页面为「承台类型 / 桩类型」卡片表单。</p>
+  <div class="tbl-wrap"><table class="tbl">
+    <tr><th>API</th><th>方法</th><th>用途</th></tr>
+    <tr><td><code>/</code></td><td class="ctr">GET</td><td>补录页面（令牌注入模板）</td></tr>
+    <tr><td><code>/api/data</code></td><td class="ctr">GET</td><td>读取型号几何 + 补录字段 + 统计（顶点数 / 桩数 / 实例数动态计算）</td></tr>
+    <tr><td><code>/api/cap/{TypeKey}</code></td><td class="ctr">PUT</td><td>保存承台配筋（底/顶/侧筋、保护层、备注、ExtraJson）</td></tr>
+    <tr><td><code>/api/pile/{TypeKey}</code></td><td class="ctr">PUT</td><td>保存桩配筋（纵筋、箍筋、加密区、保护层等）</td></tr>
+  </table></div>
+
+  <h3>4.5 校核工具 <span class="fh">tools/export_pec_wall_check_dxf.py · 626 行</span></h3>
+  <p>把转换结果按 WInfo v4 定位规则 <strong>1:1（mm）</strong>绘制 DXF：墙节点线、混凝土轮廓、墙端 H（按公式计算位置与旋转，<em>不读</em> tbl2 偏心列）、Main 腹板、加劲板、Secondary 腹板与 T 翼缘、参数图例与标注尺寸。产物见 <code>validation_output/</code>，用于人工核对 Revit 建模参数。</p>
+
+  <h3>4.6 测试 <span class="fh">tests/ · 31 例 · 2.4s</span></h3>
+  <p>纯标准库 unittest，用 <code>importlib</code> 从文件路径加载被测模块；测试夹具为「匿名最小 YDB 形状数据库」+ 仓库内真实样本（存在时追加验证）。覆盖要点：PEC 截面后缀、L/I 分组可追溯性、WInfo 完整性、墙端 H 归零、按自然层实例的 tbl2 引用、基础型号归并（顶点序/旋转无关）、配筋跨重提存活、原子更新的逐字节不变与范围拒绝。</p>
+</section>
+
+<!-- ========== 05 数据契约 ========== -->
+<section id="s5">
+  <h2><span class="no">05</span>数据契约（中间库表结构）</h2>
+
+  <h3>5.1 上部结构表</h3>
+  <div class="tbl-wrap"><table class="tbl">
+    <tr><th class="ctr">下标</th><th>字段</th><th>含义 / 来源</th></tr>
+    <tr><td colspan="3" style="color:var(--muted)">tbl1（梁 + 斜撑 · 15 列）</td></tr>
+    <tr><td class="ctr">0–5</td><td><code>BStartX … BEndZ</code></td><td>梁/撑起终点坐标（mm）；Z = 层顶 + 节点 HDiff + 杆件 HDiff1/2</td></tr>
+    <tr><td class="ctr">6</td><td><code>BSection</code></td><td>截面字符串；PEC 统一 <code>H{h}x{b}x{tw}x{tf}@PEC</code>（如 H300x200x8x20@PEC），C# 端凭 <code>@PEC</code> 后缀识别</td></tr>
+    <tr><td class="ctr">7–9</td><td><code>Tag / ID / RvtID</code></td><td>状态预留 / 输出库内连续行号 / Revit 回写 ElementId</td></tr>
+    <tr><td class="ctr">10–11</td><td><code>BSConn / BEConn</code></td><td>梁起/终点连接（tblProperty.SpBeam）</td></tr>
+    <tr><td class="ctr">12–14</td><td><code>Ecc / Ecc2 / BRotation</code></td><td><strong>梁偏心</strong>（mm 带符号，垂直梁轴水平向）+ 旋转（度）；斜撑无偏心回填 0；Ecc2 缺省回退 Ecc</td></tr>
+  </table></div>
+
+  <div class="tbl-wrap"><table class="tbl">
+    <tr><th class="ctr">下标</th><th>字段</th><th>含义 / 来源</th></tr>
+    <tr><td colspan="3" style="color:var(--muted)">tbl2（柱 · 13 列）</td></tr>
+    <tr><td class="ctr">0–5</td><td><code>CStartX … CEndZ</code></td><td>柱起终点坐标；墙端 H 的 XY 保存 Main 墙端源节点坐标</td></tr>
+    <tr><td class="ctr">6</td><td><code>CSection</code></td><td>截面字符串；PEC 柱与墙端 H 均 <code>@PEC</code> 后缀</td></tr>
+    <tr><td class="ctr">10–12</td><td><code>EccX / EccY / Rotation</code></td><td>柱偏心（mm）+ 绕竖轴转角（度）；<strong>PEC 墙端 H 统一写 0</strong>——定位由墙几何推导，普通柱与独立 PEC 柱不受影响</td></tr>
+    <tr><td colspan="3" style="color:var(--muted)">tbl3（楼层 · 2 列）</td></tr>
+    <tr><td class="ctr">0–1</td><td><code>Floor / LevelB</code></td><td><code>1F…nF + RF</code> 与标高（mm）；RF = 末层 LevelB + Height</td></tr>
+  </table></div>
+
+  <h3>5.2 tbl4（墙肢 · 17 列）与 PEC 墙协议</h3>
+  <div class="tbl-wrap"><table class="tbl">
+    <tr><th class="ctr">下标</th><th>字段</th><th>含义</th></tr>
+    <tr><td class="ctr">0–5</td><td><code>WStartX … WEndZ</code></td><td>墙肢定位线（L 墙两肢 WStart 相同 = 公共角点）</td></tr>
+    <tr><td class="ctr">6</td><td><code>WSection</code></td><td>混凝土墙厚 B；墙长 = |WEnd − WStart|（不得用 Dis1）</td></tr>
+    <tr><td class="ctr">10–11</td><td><code>BottomFloor / WEConn</code></td><td>底部标准层 / 连接预留</td></tr>
+    <tr><td class="ctr">12–16</td><td><code>WGroupID / WLegID / WLegRole / WShape / WInfo</code></td><td>逻辑墙组 <code>PECW0001</code> / 肢号 <code>-L1·-L2</code> / <code>MAIN·SECONDARY</code> / 平面组合 <code>I·L</code> / JSON（v4）</td></tr>
+  </table></div>
+  <p>索引：<code>idx_tbl2_id</code>（唯一）、<code>idx_tbl4_group</code>、<code>idx_tbl4_leg</code>（唯一，部分索引）。Main 钢构 = <strong>I</strong>（两端 H + 中间腹板 + 可选加劲板）；Secondary 钢构 = <strong>T</strong>（腹板 + 外端翼缘，尾部连 Main 角点 H）。墙内钢板与钢筋<strong>只写参数不建实体</strong>。</p>
+
+  <div class="grid2">
+<pre>{ <i>"version": 4</i>,
+  <b>"tbl2_column_refs"</b>: { "start": 3, "end": 4 },
+  <b>"steel_configuration"</b>: {
+    "cross_section_form": "I",
+    "web_thickness_mm": 10,
+    "partition_count": 4,
+    "internal_stiffener": {
+      "count": 1, "width_mm": 250,
+      "thickness_mm": 8 } },
+  <b>"source_parameters"</b>: { "section": {
+    "Kind": 211, "B": 300, "H": 10,
+    "T2": 1, "Dis": 250, "Dis1": 8 } } }
+<span class="cmt">▲ Main 墙 WInfo（I 形）</span></pre>
+<pre>{ <i>"version": 4</i>,
+  <b>"tbl2_column_refs"</b>: { "connected_main": 3 },
+  <b>"steel_configuration"</b>: {
+    "cross_section_form": "T",
+    "web_thickness_mm": 12,
+    "flange_thickness_mm": 14 },
+  <b>"source_parameters"</b>: { "section": {
+    "Kind": 212, "B": 300, "H": 12,
+    "Dis": 14, "Dis1": 150 } } }
+<span class="cmt">▲ Secondary 墙 WInfo（T 形）
+Dis1 仅透传，不作定位参数</span></pre>
+  </div>
+
+  <p><strong>参数映射</strong>（Main）：YDB <code>H</code>→腹板厚 · <code>T2+3</code>→区隔数（3/4/5 对应加劲板 0/1/2 道）· <code>Dis/Dis1</code>→加劲板宽/厚；
+  <strong>墙端 H 定位公式</strong>（Revit 端执行，数据库只存引用）：</p>
+<pre>I 墙两端：  H中心 = WStart + uM × hH/2 ；  WEnd − uM × hH/2        <span class="cmt">（uM = 墙轴向单位向量）</span>
+L 墙角点：  H中心 = Main.WStart + uM × (hH − Secondary.WSection) / 2   <span class="cmt">（样例 (600−300)/2 = 150，H 侧边与次墙混凝土面平齐）</span>
+加劲板：    按净腹板长度等分 —— 1 道居中，2 道三分点</pre>
+
+  <h3>5.3 基础表</h3>
+  <div class="tbl-wrap"><table class="tbl">
+    <tr><th>表</th><th>列数</th><th>列</th><th>要点</th></tr>
+    <tr><td><code>tbl5</code> 桩型号</td><td class="ctr">13</td><td><code>ID, TypeKey, Diameter, Length</code> + 9 个网页补录列（纵筋/箍筋/加密区/保护层/ExtraJson 等）</td><td>型号键 = 直径+长度；实例数由 tbl6×tbl7 展开计算</td></tr>
+    <tr><td><code>tbl6</code> 承台型号</td><td class="ctr">15</td><td><code>ID, TypeKey, PolygonJson, Thickness, PileLayoutJson</code> + 9 个补录列</td><td>多边形（归一化逆时针、不闭合首点）+ 厚度 + 局部桩位共同构成型号；桩位含 <code>pile_type_id</code> 引用 tbl5</td></tr>
+    <tr><td><code>tbl7</code> 承台布置</td><td class="ctr">8</td><td><code>X, Y, BottomZ, Rotation, CapTypeID, Tag, ID, RvtID</code></td><td>X/Y = 型号局部原点的世界坐标（≠几何中心）；世界坐标 = 旋转平移变换</td></tr>
+  </table></div>
+  <p><code>handoff_meta</code>（Key-Value）记录 <code>Foundation.DataSource=YDB_ONLY</code>、源文件 SHA-256、提取时间、架构版本（FOUNDATION_SCHEMA_VERSION=2）等，供后续同步门禁读取。</p>
+</section>
+
+<!-- ========== 06 使用方式 ========== -->
+<section id="s6">
+  <h2><span class="no">06</span>使用方式</h2>
+
+  <h3>命令行</h3>
+<pre><span class="cmt"># 上部结构提取（Revit/批处理必须显式传模式）</span>
+ydb转换.exe <i>&lt;上部结构.ydb&gt;</i> -o <i>&lt;ydb转换数据库.db&gt;</i> --mode upper
+<span class="cmt"># 基础提取</span>
+ydb转换.exe <i>&lt;jccad.ydb&gt;</i>     -o <i>&lt;ydb转换数据库.db&gt;</i> --mode foundation
+<span class="cmt"># 基础提取 + 打开本机补录网页（--web 仅限基础模式）</span>
+py .\ydb转换.py ".\基础部分模型\jccad.ydb" -o ".\ydb转换数据库.db" --web
+<span class="cmt"># 只打开已有中间库的补录网页</span>
+py .\foundation_web.py ".\ydb转换数据库.db"</pre>
+
+  <ul>
+    <li>省略 <code>source</code> 双击 EXE → 弹出 Win32 原生文件选择框；取消返回 <code>status=cancelled</code>。</li>
+    <li>省略 <code>-o</code> → 默认网络盘 <code>Y:\数字化课题\数据库\ydb转换数据库.db</code>，回退本地 Revit Addins 目录。</li>
+    <li><strong>标准输出为单行 JSON</strong>：成功含 <code>mode / status / protected_sha256</code>（upper 另含 <code>foundation_sha256</code>）与统计；失败含 <code>error_type / error</code>。</li>
+    <li>退出码：<strong>0</strong> 成功 · <strong>1</strong> 错误 · <strong>2</strong> 用户取消。不得以「进程退出但无成功 JSON」作为可覆盖正式库的依据。</li>
+  </ul>
+
+  <h3>开发与打包</h3>
+<pre>py -m unittest discover -s tests      <span class="cmt"># 31 例回归（stdout 末行 OK）</span>
+py tools\export_pec_wall_check_dxf.py &lt;dtlmodel.ydb&gt; -o .\validation_output\核对.dxf
+pyinstaller ydb转换.spec              <span class="cmt"># 重新打包 dist\ydb转换.exe（改 ydb转换.py 后必须重打包）</span></pre>
+  <div class="note orange">本机注意：<code>python</code> 不在 PATH，须用 <code>py</code>（Python 3.13）；工程纯标准库实现，无需 pip install 任何包。</div>
+</section>
+
+<!-- ========== 07 样本验证 ========== -->
+<section id="s7">
+  <h2><span class="no">07</span>样本验证结果（仓库实测）</h2>
+
+  <h3>PEC 剪力墙样本 <span class="fh">PEC剪力墙测试\dtlmodel_PECWall.ydb</span></h3>
+  <ul>
+    <li>tbl1：0 行 · tbl2：4 行（墙端 H 偏心/旋转均为 0）· tbl3：<code>1F=0, RF=3300</code> · tbl4：3 行 = 2 个逻辑组 · integrity_check=ok</li>
+    <li><code>PECW0001-L1</code>：I-Main，墙厚 200 / 腹板 10 / 3 区隔 / 0 道加劲板，引用 H300×200×8×20 两根</li>
+    <li><code>PECW0002-L1</code>：L-Main，墙厚 300 / 腹板 10 / 4 区隔 / 1 道 250×8 加劲板，引用 H600×300×7×22 两根</li>
+    <li><code>PECW0002-L2</code>：Secondary，节点长度 968.625419 / 腹板 12 / 翼缘 300×14，<code>connected_main</code> 指向 L-Main 角点 H（计算偏移 150）</li>
+  </ul>
+
+  <h3>基础样本 <span class="fh">基础部分模型\jccad.ydb</span></h3>
+  <ul>
+    <li>tbl5 桩型号 1 种：D1000 × L31000 mm；tbl6 承台型号 5 种（每台桩数 1/1/2/2/3）；tbl7 布置 88 处 → 展开桩总数 <strong>173 根</strong></li>
+    <li>数据源标识 <code>handoff_meta['Foundation.DataSource'] = YDB_ONLY</code>（全程未读 DWG）</li>
+  </ul>
+  <p>几何与参数另由 <code>validation_output\PEC墙参数测量核对.dxf / .png</code> 提供 1:1 图形核对。</p>
+</section>
+
+<!-- ========== 08 路线图 ========== -->
+<section id="s8">
+  <h2><span class="no">08</span>当前状态与路线图</h2>
+
+  <h3>已完成 <span class="fh">全部 31 测试通过</span></h3>
+  <ul>
+    <li><span class="badge b-good">已完成</span> 上部结构 + 基础两条提取管线，写入同一统一数据库</li>
+    <li><span class="badge b-good">已完成</span> PEC 梁/柱/墙提取与 WInfo v4 协议（I/L 分组、墙端 H 引用）</li>
+    <li><span class="badge b-good">已完成</span> 梁偏心三列导出（Ecc / Ecc2 / BRotation，仅尾部追加）</li>
+    <li><span class="badge b-good">已完成</span> 原子更新保护（范围指纹 + 并发检测 + integrity_check）</li>
+    <li><span class="badge b-good">已完成</span> tbl5/tbl6 本机网页补录（令牌鉴权、配筋跨重提存活）</li>
+    <li><span class="badge b-good">已完成</span> PEC 墙参数核对 DXF 导出工具</li>
+  </ul>
+
+  <h3>规划中的同步功能 <span class="fh">依据 handoff-Revit-结构信息录入与模型同步.md</span></h3>
+  <div class="tbl-wrap"><table class="tbl">
+    <tr><th>阶段</th><th>内容</th><th>状态</th></tr>
+    <tr><td><code>A</code></td><td>身份与稳定键：handoff_meta 增加 DatasetId / GeometryRevision / DataRevision / Fingerprint；tbl1·2·4·7 追加 SyncKey</td><td><span class="badge b-warn">规划中</span></td></tr>
+    <tr><td><code>B</code></td><td>EXE 增加 <code>--edit-db</code> 会话模式：Revit 隐藏启动、动态端口、一次性令牌握手、文档会话绑定</td><td><span class="badge b-warn">规划中</span></td></tr>
+    <tr><td><code>C</code></td><td>预览与参数更新：ExternalEvent 主线程事务、参数映射白名单、差异预览门禁</td><td><span class="badge b-warn">规划中</span></td></tr>
+    <tr><td><code>D</code></td><td>清单与验收：未匹配/歧义/失败清单（UPDATED / DB_ONLY / AMBIGUOUS 等状态码）、CSV·JSON 导出</td><td><span class="badge b-warn">规划中</span></td></tr>
+  </table></div>
+  <div class="note">文档明确约束：阶段 A 的身份与稳定键落地前，<strong>不得开放「更新模型」按钮</strong>。Revit C# 端源码不在本仓库。</div>
+
+  <h3>已知下游问题</h3>
+  <ul>
+    <li><span class="badge b-serious">待评估</span> C# 端柱偏心变换把<strong>度</strong>的 <code>Rotation</code> 当弧度使用（<code>SqliteDataToRevit.cs:206-219</code>），带转角的偏心柱会算错位 —— 详见《YJK坐标系与梁柱偏心定义.md》§5.2。</li>
+    <li><span class="badge b-serious">待确认</span> <code>Ecc</code> 与 <code>Ecc2</code> 是否分别为梁起/终点两端偏心：现有模型恒等，需做两端不同的测试梁验证。</li>
+  </ul>
+</section>
+
+</main>
+</div>
+
+<footer>
+  ydb2revit_exe 工程介绍 · 由仓库源码与 handoff_doc 协议文档整理 · 生成于 2026-08-27 ·
+  单文件自包含（无外部资源，支持深色模式与打印）
+</footer>
+
+<script>
+/* 目录滚动高亮（渐进增强，禁用 JS 不影响阅读） */
+(function () {
+  var links = document.querySelectorAll("nav.toc a");
+  var map = {};
+  links.forEach(function (a) { map[a.getAttribute("href").slice(1)] = a; });
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (e.isIntersecting) {
+        links.forEach(function (a) { a.classList.remove("on"); });
+        var a = map[e.target.id]; if (a) a.classList.add("on");
+      }
+    });
+  }, { rootMargin: "-20% 0px -70% 0px" });
+  document.querySelectorAll("main section").forEach(function (s) { io.observe(s); });
+})();
+</script>
+</body>
+</html>
