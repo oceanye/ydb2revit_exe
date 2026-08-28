@@ -349,7 +349,12 @@ def _convert_ydb_in_place(source_path, destination_path):
         raise ValueError("Source YDB and destination database must be different files")
 
     destination_path.parent.mkdir(parents=True, exist_ok=True)
-    source = sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True)
+    # UNC 路径（\\server\share\...）经 as_uri() 会生成 file://server/...，
+    # SQLite 拒绝非 localhost 的 URI authority，因此 UNC 时退回普通路径打开。
+    if source_path.drive.startswith("\\\\"):
+        source = sqlite3.connect(str(source_path))
+    else:
+        source = sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True)
     source.row_factory = sqlite3.Row
     source.text_factory = _decode_sqlite_text
 
