@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import sqlite3
+import struct
 import tempfile
 import unittest
 from contextlib import closing
@@ -12,6 +13,21 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("ydb_converter", ROOT / "ydb转换.py")
 CONVERTER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CONVERTER)
+
+
+def build_packed_hot_rolled_value(section_id, name, height, width):
+    """Build a Kind-26 packed subsection ShapeVal exactly like YJK 8.1 does."""
+    blob = struct.pack("<H", 39) + name.encode("ascii").ljust(30, b"\x00")
+    fields = [26]
+    fields.extend(struct.unpack("<8I", blob))
+    fields.append(int(width * 65536))    # [9]  翼缘宽 Q16
+    fields.append(int(height * 65536))   # [10] 总高 Q16
+    fields.extend([0, 0, 0])             # [11..13]
+    fields.append(0)                     # [14] 自定义标志：标准热轧
+    fields.append(327680)                # [15] 材料 Q16 = 5
+    fields.extend([0] * (41 - len(fields)))
+    fields.append(section_id)            # [41] 尾部截面 ID
+    return ",".join(str(value) for value in fields) + ","
 
 
 def create_anonymous_pec_fixture(path):
@@ -460,6 +476,60 @@ class PecConversionTests(unittest.TestCase):
             self.assertIn("901", message)
             self.assertIn("PEC", message)
             self.assertFalse(Path(destination).exists())
+
+    def test_packed_hot_rolled_subsection_decodes(self):
+        # 颛桥实测形态：209 主表尺寸全零，尺寸藏在子表 ShapeVal 的 Kind-26
+        # 打包串里（选择器 39 + 名称 HN400X200 + Q16 H/B），厚度取国标规格表。
+        packed = build_packed_hot_rolled_value(902, "HN400X200", 400, 200)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "packed.ydb"
+            destination = Path(temp_dir) / "out.db"
+            with closing(sqlite3.connect(str(source))) as connection:
+                connection.executescript("""
+                    CREATE TABLE tblFloor (
+                        ID INTEGER, No_ INTEGER, Name TEXT, StdFlrID INTEGER,
+                        LevelB REAL, Height REAL
+                    );
+                    INSERT INTO tblFloor VALUES (1,1,'',10,0,3300);
+                    CREATE TABLE tblJoint (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        X REAL, Y REAL, HDiff REAL
+                    );
+                    INSERT INTO tblJoint VALUES (1,1,10,0,0,0), (2,2,10,0,6000,0);
+                    CREATE TABLE tblGrid (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        Jt1ID INTEGER, Jt2ID INTEGER
+                    );
+                    INSERT INTO tblGrid VALUES (11,1,10,1,2);
+                    CREATE TABLE tblBeamSect (
+                        ID INTEGER, No_ INTEGER, Mat INTEGER, Kind INTEGER,
+                        ShapeVal TEXT, b REAL, h REAL, u REAL, t REAL, d REAL, f REAL
+                    );
+                    INSERT INTO tblBeamSect VALUES (902,1,0,209,'209,902,',
+                        0,0,0,0,0,0);
+                    CREATE TABLE tblBeamSeg (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER, SectID INTEGER,
+                        GridID INTEGER, HDiff1 REAL, HDiff2 REAL
+                    );
+                    INSERT INTO tblBeamSeg VALUES (502,1,10,902,11,0,0);
+                    CREATE TABLE tblSubSectionSect (
+                        ID INTEGER, Kind INTEGER, No_ INTEGER, SubKind INTEGER,
+                        ShapeVal TEXT, b REAL, h REAL, u REAL, t REAL, d REAL, f REAL
+                    );
+                """)
+                connection.execute(
+                    "INSERT INTO tblSubSectionSect VALUES (902,12,1,26,?,0,0,0,0,0,0)",
+                    (packed,),
+                )
+                connection.commit()
+            CONVERTER.convert_ydb(str(source), str(destination))
+            with closing(sqlite3.connect(str(destination))) as connection:
+                sections = [
+                    row[0] for row in connection.execute(
+                        "SELECT BSection FROM tbl1"
+                    )
+                ]
+        self.assertEqual(["H400x200x8x13@PEC"], sections)
 
 
 if __name__ == "__main__":

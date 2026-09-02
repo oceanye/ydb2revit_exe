@@ -21,6 +21,7 @@ import argparse
 import json
 import math
 import sqlite3
+import struct
 from pathlib import Path
 
 from foundation_handoff import convert_foundation_ydb, is_foundation_ydb
@@ -136,6 +137,90 @@ def _legacy_section_text(section):
     return shape_value + "@" + details
 
 
+# GB/T 11263-2017 热轧 H 型钢常用规格（腹板厚, 翼缘厚），按 (系列, H, B) 索引。
+# 用于两段式名称（如 HN400X200）在 tblSubSectionSect 打包串中的厚度还原；
+# 未收录的名称仍按显式拒绝处理。颛桥样例的 6 个截面全部命中此表。
+STANDARD_HOT_ROLLED_H = {
+    ("HW", 100, 100): (6, 8), ("HW", 125, 125): (6.5, 9),
+    ("HW", 150, 150): (7, 10), ("HW", 175, 175): (7.5, 11),
+    ("HW", 200, 200): (8, 12), ("HW", 250, 250): (9, 14),
+    ("HW", 300, 300): (10, 15), ("HW", 350, 350): (12, 19),
+    ("HW", 400, 400): (13, 21),
+    ("HM", 148, 100): (6, 9), ("HM", 194, 150): (6, 9),
+    ("HM", 244, 175): (7, 11), ("HM", 294, 200): (8, 12),
+    ("HM", 340, 250): (9, 14), ("HM", 390, 300): (10, 16),
+    ("HM", 440, 300): (11, 18), ("HM", 482, 300): (11, 15),
+    ("HM", 488, 300): (11, 18), ("HM", 582, 300): (12, 17),
+    ("HM", 588, 300): (12, 20), ("HM", 594, 302): (14, 23),
+    ("HN", 198, 99): (4.5, 7), ("HN", 200, 100): (5.5, 8),
+    ("HN", 250, 125): (6, 9), ("HN", 300, 150): (6.5, 9),
+    ("HN", 350, 175): (7, 11), ("HN", 400, 150): (8, 13),
+    ("HN", 400, 200): (8, 13), ("HN", 450, 150): (9, 14),
+    ("HN", 450, 200): (9, 14), ("HN", 500, 200): (10, 16),
+    ("HN", 600, 200): (11, 17), ("HN", 700, 300): (13, 24),
+    ("HN", 800, 300): (14, 26), ("HN", 900, 300): (16, 28),
+}
+
+
+def _packed_hot_rolled_h_dimensions(subsection):
+    """Decode a Kind-26 packed subsection ShapeVal into (h, b, tw, tf).
+
+    Layout per "YJK Kind26热轧H型钢与Kind209_YDB解析说明": 42 CSV integers,
+    [0]=26, [1..8]=selector(2B)+name(30B) blob, [9]=b Q16, [10]=h Q16,
+    [14]=custom flag, [41]=section ID.  Only the standard catalogue selector
+    (39) with a cross-validated name is accepted; everything else stays
+    unexplained and the caller rejects the section explicitly.
+    """
+    if subsection is None:
+        return None
+    text = str(_value(subsection, "ShapeVal", "") or "")
+    try:
+        fields = [int(part) for part in text.strip(",").split(",")]
+    except ValueError:
+        return None
+    if len(fields) < 42 or fields[0] != 26 or fields[14] != 0:
+        return None
+    blob = struct.pack("<8I", *fields[1:9])
+    if blob[0] | (blob[1] << 8) != 39:
+        return None
+    name = blob[2:].split(b"\x00")[0]
+    try:
+        name = name.decode("ascii").strip().upper()
+    except UnicodeDecodeError:
+        return None
+    height = fields[10] / 65536.0
+    width = fields[9] / 65536.0
+    if fields[41] != _as_int(_value(subsection, "ID"), 0):
+        return None
+    parts = name.split("X")
+    if len(parts) == 4 and parts[0].startswith("H") and not parts[0][1:3].isdigit():
+        # 四段式自定义名称 "H400X200X8X13"：厚度直接在名称里。
+        try:
+            if abs(float(parts[0][1:]) - height) > 0.5:
+                return None
+            if abs(float(parts[1]) - width) > 0.5:
+                return None
+            return height, width, float(parts[2]), float(parts[3])
+        except ValueError:
+            return None
+    if len(parts) == 2 and parts[0][:2] in ("HW", "HM", "HN"):
+        # 两段式标准热轧名称 "HN400X200"：查内置国标规格表取厚度。
+        try:
+            named_height = float(parts[0][2:])
+            named_width = float(parts[1])
+        except ValueError:
+            return None
+        if abs(named_height - height) > 0.5 or abs(named_width - width) > 0.5:
+            return None
+        thickness = STANDARD_HOT_ROLLED_H.get(
+            (parts[0][:2], int(round(named_height)), int(round(named_width)))
+        )
+        if thickness is None:
+            return None
+        return height, width, thickness[0], thickness[1]
+    return None
+
+
 def _h_dimensions(section, subsection=None):
     """Return conventional (height, flange width, web, flange) dimensions."""
     if section is None:
@@ -157,6 +242,9 @@ def _h_dimensions(section, subsection=None):
     else:
         return None
     if None in (height, width, web, flange):
+        # 主表与子表数值列都不全时，尝试子表 ShapeVal 里的 Kind-26 打包定义。
+        if kind == 209:
+            return _packed_hot_rolled_h_dimensions(subsection)
         return None
     return height, width, web, flange
 
