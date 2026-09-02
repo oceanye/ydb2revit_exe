@@ -20,6 +20,7 @@ existing Revit add-in. PEC data is deliberately compact:
 import argparse
 import json
 import math
+import re
 import sqlite3
 import struct
 from pathlib import Path
@@ -32,6 +33,68 @@ PEC_WALL_KINDS = {211, 212}
 PEC_MAIN_WALL_KIND = 211
 PEC_SECONDARY_WALL_KIND = 212
 WINFO_VERSION = 4
+
+# ---------------------------------------------------------------------------
+# 截面文本契约：与 CreateNewExtern/SectionTextParser.cs 保持一致。
+# 权威来源为 E:\revit-external-tool2.git（插件源码仓库，只读参考）：
+#   * PEC 标记 = 末尾 "@PEC" 后缀，不区分大小写，仅识别最后一个；
+#   * H 截面文本 = H{h}{sep}{b}{sep}{tw}{sep}{tf}，sep ∈ x/X/×/*，允许空白；
+#   * 尺寸为正数，最多 3 位小数（"0.###"），规范名用大写 X 分隔；
+#   * 同尺寸的 PEC 与普通 H 型钢不得视为同一截面。
+# ---------------------------------------------------------------------------
+PEC_SUFFIX = "@PEC"
+_H_SECTION_TEXT_PATTERN = re.compile(
+    r"^H\s*(\d+(?:\.\d+)?)\s*[xX\u00d7*]\s*(\d+(?:\.\d+)?)"
+    r"\s*[xX\u00d7*]\s*(\d+(?:\.\d+)?)\s*[xX\u00d7*]\s*(\d+(?:\.\d+)?)$",
+    re.IGNORECASE,
+)
+
+
+def has_pec_suffix(section_text):
+    """截面文本是否带 PEC 标记（仅末尾 @PEC，不区分大小写）。"""
+    text = str(section_text or "").rstrip()
+    return text.lower().endswith(PEC_SUFFIX.lower())
+
+
+def remove_pec_suffix(section_text):
+    """只移除末尾一个 @PEC；其余 @ 元数据保持原样（旧 ShapeVal 兼容）。"""
+    text = str(section_text or "").strip()
+    if has_pec_suffix(text):
+        return text[: -len(PEC_SUFFIX)].rstrip()
+    return text
+
+
+def parse_h_section_text(section_text):
+    """按 SectionTextParser 契约解析 H 截面文本。
+
+    返回 (h, b, tw, tf, is_pec)，无法解析返回 None。兼容旧 C# 输出的
+    末尾多余 "X"（"...X@PEC"）。
+    """
+    if section_text is None:
+        return None
+    is_pec = has_pec_suffix(section_text)
+    core = remove_pec_suffix(section_text)
+    if is_pec and core.upper().endswith("X"):
+        core = core[:-1].rstrip()
+    match = _H_SECTION_TEXT_PATTERN.match(core.strip())
+    if match is None:
+        return None
+    values = [float(part) for part in match.groups()]
+    if any(value <= 0 for value in values):
+        return None
+    return values[0], values[1], values[2], values[3], is_pec
+
+
+def format_h_section(height, width, web, flange, pec):
+    """输出规范截面名：H{h}X{b}X{tw}X{tf}（0.###，大写 X）+ @PEC。"""
+    def dimension(value):
+        text = format(float(value), ".3f").rstrip("0").rstrip(".")
+        return text or "0"
+
+    name = "H" + "X".join(
+        dimension(value) for value in (height, width, web, flange)
+    )
+    return name + PEC_SUFFIX if pec else name
 
 
 def _decode_sqlite_text(raw):
@@ -252,13 +315,13 @@ def _h_dimensions(section, subsection=None):
 def _h_section_name(section, subsection=None, pec=False):
     dimensions = _h_dimensions(section, subsection)
     if dimensions is None:
+        # 尺寸不可解析的 PEC 截面会在装配后统一显式拒绝，此兜底不会落库。
         raw = str(_value(section, "ShapeVal", "") or "").rstrip(",")
         base = raw or "H"
-    else:
-        base = "H" + "x".join(_format_number(value) for value in dimensions)
-    if pec and not base.upper().endswith("@PEC"):
-        base += "@PEC"
-    return base
+        if pec and not has_pec_suffix(base):
+            base += PEC_SUFFIX
+        return base
+    return format_h_section(*dimensions, pec=pec)
 
 
 def _group_by(rows, column):

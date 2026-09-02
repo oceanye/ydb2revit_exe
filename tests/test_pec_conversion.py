@@ -155,8 +155,8 @@ class PecConversionTests(unittest.TestCase):
             beam_sections = [row[0] for row in connection.execute("SELECT BSection FROM tbl1")]
             column_sections = [row[0] for row in connection.execute("SELECT CSection FROM tbl2")]
             column_columns = [row[1] for row in connection.execute("PRAGMA table_info(tbl2)")]
-        self.assertEqual(["H400x150x10x20@PEC"], beam_sections)
-        self.assertEqual(["H244x175x8x12@PEC"] * 4, column_sections)
+        self.assertEqual(["H400X150X10X20@PEC"], beam_sections)
+        self.assertEqual(["H244X175X8X12@PEC"] * 4, column_sections)
         self.assertFalse(any(name.startswith("Ydb") for name in column_columns))
 
     def test_l_and_i_wall_groups_are_traceable(self):
@@ -327,8 +327,8 @@ class PecConversionTests(unittest.TestCase):
                 "SELECT CSection,EccX,EccY,Rotation FROM tbl2 ORDER BY ID"
             ).fetchall()
             sections = [row[0] for row in rows]
-        self.assertEqual(["H244x175x8x12@PEC"] * 4, sections[:4])
-        self.assertEqual("H400x200x8x16@PEC", sections[4])
+        self.assertEqual(["H244X175X8X12@PEC"] * 4, sections[:4])
+        self.assertEqual("H400X200X8X16@PEC", sections[4])
         self.assertEqual((7.0, 8.0, 9.0), rows[4][1:])
 
     def test_kind2_column_at_secondary_outer_end_is_not_a_main_end_column(self):
@@ -529,7 +529,51 @@ class PecConversionTests(unittest.TestCase):
                         "SELECT BSection FROM tbl1"
                     )
                 ]
-        self.assertEqual(["H400x200x8x13@PEC"], sections)
+        self.assertEqual(["H400X200X8X13@PEC"], sections)
+
+    def test_section_text_contract_matches_csharp_parser(self):
+        # 契约权威来源：CreateNewExtern/SectionTextParser.cs（只读参考仓库
+        # E:\revit-external-tool2.git）。此处锁定 Python 端与之一致的行为。
+        parse = CONVERTER.parse_h_section_text
+        self.assertEqual(
+            (400, 200, 8, 13, True),
+            parse("H400X200X8X13@PEC"),
+        )
+        self.assertEqual(                      # 小写 x 同样接受（C# 忽略大小写）
+            parse("H400x200x8x13@PEC"),
+            parse("H400X200X8X13@PEC"),
+        )
+        self.assertEqual(                      # × 与 * 分隔符
+            parse("H400×200×8×13@PEC"),
+            parse("H400*200*8*13@PEC"),
+        )
+        self.assertEqual(                      # 旧 C# 输出的末尾多余 X
+            parse("H400X200X8X13X@PEC"),
+            (400, 200, 8, 13, True),
+        )
+        self.assertEqual(
+            (400, 200, 8, 13, False),
+            parse("H400X200X8X13"),
+        )
+        self.assertIsNone(parse("209,33506@PEC"))
+        self.assertIsNone(parse("H400X200X0X13@PEC"))   # 尺寸必须为正
+        self.assertTrue(CONVERTER.has_pec_suffix("h400x200x8x13@pec"))
+        self.assertFalse(CONVERTER.has_pec_suffix("H400X200X8X13"))
+        self.assertEqual("209,33506", CONVERTER.remove_pec_suffix("209,33506@PEC"))
+        # 规范输出：大写 X、0.### 数字格式
+        self.assertEqual(
+            "H300X150X6.5X9@PEC",
+            CONVERTER.format_h_section(300, 150, 6.5, 9, pec=True),
+        )
+        self.assertEqual(
+            "H400X200X8X13",
+            CONVERTER.format_h_section(400.0, 200.0, 8.0, 13.0, pec=False),
+        )
+        # 同尺寸 PEC 与普通 H 名称不同（梁合并不得视为同一截面）
+        self.assertNotEqual(
+            CONVERTER.format_h_section(400, 200, 8, 13, pec=True),
+            CONVERTER.format_h_section(400, 200, 8, 13, pec=False),
+        )
 
 
 if __name__ == "__main__":
