@@ -416,6 +416,16 @@ def _convert_ydb_in_place(source_path, destination_path):
             pec_main_wall_nodes.add((standard_floor_id, _value(grid, "Jt2ID")))
 
     tbl1_rows = []
+    # PEC sections whose four H dimensions cannot be resolved anywhere must
+    # fail the conversion explicitly: emitting the raw ShapeVal with an @PEC
+    # suffix would produce an unparseable section string downstream.
+    unresolved_pec_sections = {}
+
+    def _note_unresolved_pec(member_kind, section, subsection):
+        if _h_dimensions(section, subsection) is None:
+            key = (member_kind, _value(section, "ID"))
+            unresolved_pec_sections[key] = unresolved_pec_sections.get(key, 0) + 1
+
     for floor in floors:
         standard_floor_id = _value(floor, "StdFlrID")
         top_z = _as_float(_value(floor, "LevelB")) + _as_float(_value(floor, "Height"))
@@ -429,6 +439,9 @@ def _convert_ydb_in_place(source_path, destination_path):
                 continue
             section = beam_sections.get(_value(segment, "SectID"))
             if _section_kind(section) == 209:
+                _note_unresolved_pec(
+                    "梁", section, subsections.get(_value(segment, "SectID"))
+                )
                 section_text = _h_section_name(
                     section, subsections.get(_value(segment, "SectID")), pec=True
                 )
@@ -482,6 +495,10 @@ def _convert_ydb_in_place(source_path, destination_path):
             # also references them to preserve the wall-to-column relationship.
             is_wall_end_h = kind == 2 and node_key in pec_main_wall_nodes
             is_pec_h = kind == 209 or is_wall_end_h
+            if is_pec_h:
+                _note_unresolved_pec(
+                    "柱", section, subsections.get(_value(segment, "SectID"))
+                )
             section_text = (
                 _h_section_name(section, subsections.get(_value(segment, "SectID")), pec=True)
                 if is_pec_h else _legacy_section_text(section)
@@ -514,6 +531,20 @@ def _convert_ydb_in_place(source_path, destination_path):
                 wall_h_column_ids_by_node.setdefault(reference_key, []).append(
                     output_column_id
                 )
+
+    if unresolved_pec_sections:
+        source.close()
+        summary = "；".join(
+            "%s截面 SectID=%s（%d 根构件）" % (member_kind, sect_id, count)
+            for (member_kind, sect_id), count in sorted(
+                unresolved_pec_sections.items(),
+                key=lambda item: (item[0][0], _as_int(item[0][1])),
+            )
+        )
+        raise ValueError(
+            "PEC 截面缺少尺寸数据，无法生成 H 截面字符串：" + summary +
+            "。请在 YJK 中为这些截面补全尺寸（或重选标准截面）后重新导出 ydb。"
+        )
 
     wall_records = []
     for floor_index, floor in enumerate(floors):

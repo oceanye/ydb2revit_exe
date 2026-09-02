@@ -414,6 +414,53 @@ class PecConversionTests(unittest.TestCase):
             rows,
         )
 
+    def test_dimensionless_pec_section_fails_explicitly(self):
+        # A Kind-209 section with no dimensions anywhere must abort the
+        # conversion naming the section, never emit an unparseable @PEC string.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "dimless.ydb"
+            destination = Path(temp_dir) / "out.db"
+            with closing(sqlite3.connect(str(source))) as connection:
+                connection.executescript("""
+                    CREATE TABLE tblFloor (
+                        ID INTEGER, No_ INTEGER, Name TEXT, StdFlrID INTEGER,
+                        LevelB REAL, Height REAL
+                    );
+                    INSERT INTO tblFloor VALUES (1,1,'',10,0,3300);
+                    CREATE TABLE tblJoint (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        X REAL, Y REAL, HDiff REAL
+                    );
+                    INSERT INTO tblJoint VALUES (1,1,10,0,0,0), (2,2,10,0,6000,0);
+                    CREATE TABLE tblGrid (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        Jt1ID INTEGER, Jt2ID INTEGER
+                    );
+                    INSERT INTO tblGrid VALUES (11,1,10,1,2);
+                    CREATE TABLE tblBeamSect (
+                        ID INTEGER, No_ INTEGER, Mat INTEGER, Kind INTEGER,
+                        ShapeVal TEXT, b REAL, h REAL, u REAL, t REAL, d REAL, f REAL
+                    );
+                    INSERT INTO tblBeamSect VALUES (901,1,0,209,'209,901,',
+                        0,0,0,0,0,0);
+                    CREATE TABLE tblBeamSeg (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER, SectID INTEGER,
+                        GridID INTEGER, HDiff1 REAL, HDiff2 REAL
+                    );
+                    INSERT INTO tblBeamSeg VALUES (501,1,10,901,11,0,0);
+                    CREATE TABLE tblSubSectionSect (
+                        ID INTEGER, Kind INTEGER, No_ INTEGER, SubKind INTEGER,
+                        ShapeVal TEXT, b REAL, h REAL, u REAL, t REAL, d REAL, f REAL
+                    );
+                """)
+                connection.commit()
+            with self.assertRaises(ValueError) as caught:
+                CONVERTER.convert_ydb(str(source), str(destination))
+            message = str(caught.exception)
+            self.assertIn("901", message)
+            self.assertIn("PEC", message)
+            self.assertFalse(Path(destination).exists())
+
 
 if __name__ == "__main__":
     unittest.main()
