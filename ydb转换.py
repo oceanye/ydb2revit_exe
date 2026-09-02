@@ -652,14 +652,39 @@ def _convert_ydb_in_place(source_path, destination_path):
             record["shape"], wall_info,
         ))
 
+    # tbl3 is the full set of level elevations: every floor bottom plus every
+    # floor top, deduplicated by elevation.  In continuous single-tower models
+    # each interior top equals the next floor bottom, so the output keeps the
+    # legacy shape (bottoms + one RF).  In multi-tower models with a detached
+    # top (e.g. a sloped-roof storey) the top would otherwise be missing and
+    # the Revit side could not match a level for members ending there.
     tbl3_rows = []
+    seen_elevations = set()
+
+    def _add_level(name, elevation):
+        key = round(_as_float(elevation), 6)
+        if key in seen_elevations:
+            return
+        seen_elevations.add(key)
+        tbl3_rows.append((name, elevation))
+
     for index, floor in enumerate(floors, start=1):
-        tbl3_rows.append((str(index) + "F", _value(floor, "LevelB")))
+        _add_level(str(index) + "F", _value(floor, "LevelB"))
+    # Claim "RF" for the last floor top first so the name always survives
+    # deduplication and continuous models stay byte-identical to the old output.
     last_floor = floors[-1]
-    tbl3_rows.append((
+    _add_level(
         "RF",
         _as_float(_value(last_floor, "LevelB")) + _as_float(_value(last_floor, "Height")),
-    ))
+    )
+    # Add interior tops that no floor bottom absorbs; name them RF2, RF3, ...
+    intermediate_index = 1
+    for floor in floors[:-1]:
+        top = _as_float(_value(floor, "LevelB")) + _as_float(_value(floor, "Height"))
+        previous = len(tbl3_rows)
+        _add_level("RF" + str(intermediate_index + 1), top)
+        if len(tbl3_rows) > previous:
+            intermediate_index += 1
 
     destination = sqlite3.connect(str(destination_path))
     try:

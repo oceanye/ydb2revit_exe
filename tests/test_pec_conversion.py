@@ -346,6 +346,74 @@ class PecConversionTests(unittest.TestCase):
         self.assertEqual(0, pec_count)
         self.assertEqual(0, subsection_exists)
 
+    @staticmethod
+    def _convert_floors_fixture(floors):
+        """Convert a floors-only YDB and return the tbl3 rows (name, elevation)."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "floors.ydb"
+            destination = Path(temp_dir) / "out.db"
+            with closing(sqlite3.connect(str(source))) as connection:
+                connection.executescript("""
+                    CREATE TABLE tblFloor (
+                        ID INTEGER, No_ INTEGER, Name TEXT, StdFlrID INTEGER,
+                        LevelB REAL, Height REAL
+                    );
+                    CREATE TABLE tblJoint (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        X REAL, Y REAL, HDiff REAL
+                    );
+                    CREATE TABLE tblGrid (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        Jt1ID INTEGER, Jt2ID INTEGER
+                    );
+                """)
+                connection.executemany(
+                    "INSERT INTO tblFloor VALUES (?,?,'',?, ?, ?)",
+                    [(i, i, i, level_b, height)
+                     for i, (level_b, height) in enumerate(floors, start=1)],
+                )
+                connection.commit()
+            CONVERTER.convert_ydb(str(source), str(destination))
+            with closing(sqlite3.connect(str(destination))) as connection:
+                return [
+                    (name, round(elevation, 6))
+                    for name, elevation in connection.execute(
+                        "SELECT Floor,LevelB FROM tbl3"
+                    )
+                ]
+
+    def test_tbl3_includes_detached_intermediate_tops(self):
+        # Multi-tower shape from handoff-Python端-tbl3标高集合多塔缺口.md:
+        # an absorbed top, a detached (sloped-roof) top, a duplicated bottom
+        # and a tower restart must all appear in the level set exactly once.
+        rows = self._convert_floors_fixture([
+            (0.0, 3000.0),     # top 3000 absorbed by the next bottom
+            (3000.0, 2295.0),  # top 5295 detached -> RF2
+            (5100.0, 2800.0),  # tower restart; top 7900 detached -> RF3
+            (5100.0, 1000.0),  # duplicated bottom deduplicated; last top -> RF
+        ])
+        self.assertEqual(
+            [("1F", 0.0), ("2F", 3000.0), ("3F", 5100.0),
+             ("RF", 6100.0), ("RF2", 5295.0), ("RF3", 7900.0)],
+            rows,
+        )
+        names = [name for name, _ in rows]
+        self.assertEqual(len(names), len(set(names)), "level names must be unique")
+        self.assertEqual(1, names.count("RF"))
+
+    def test_tbl3_continuous_model_output_unchanged(self):
+        # In a continuous single-tower model every interior top equals the next
+        # bottom, so tbl3 must stay identical to the legacy bottoms+RF output.
+        rows = self._convert_floors_fixture([
+            (0.0, 3000.0),
+            (3000.0, 3300.0),
+            (6300.0, 3600.0),
+        ])
+        self.assertEqual(
+            [("1F", 0.0), ("2F", 3000.0), ("3F", 6300.0), ("RF", 9900.0)],
+            rows,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
