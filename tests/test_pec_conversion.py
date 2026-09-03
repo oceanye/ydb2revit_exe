@@ -30,6 +30,85 @@ def build_packed_hot_rolled_value(section_id, name, height, width):
     return ",".join(str(value) for value in fields) + ","
 
 
+def build_packed_short_value(name, height, width):
+    """Build the 11-field short Kind-26 packed form (handoff 2026-09-03)."""
+    blob = struct.pack("<H", 39) + name.encode("ascii").ljust(10, b"\x00")
+    blob = blob[:12]
+    fields = [26]
+    fields.extend(struct.unpack("<3I", blob))   # [1..3] 选择器+名称 12 字节
+    fields.extend([0, 0, 0, 0, 0])              # [4..8]
+    fields.append(int(width * 65536))           # [9]
+    fields.append(int(height * 65536))          # [10]
+    return ",".join(str(value) for value in fields) + ","
+
+
+def convert_single_209_beam(main_dims, subsection=None, sect_id=903):
+    """Convert a one-beam YDB with a configurable Kind-209 section.
+
+    main_dims = (t, d, u, f) written to tblBeamSect; subsection is
+    ("packed", shapeval_text) or ("numeric", (b, h, u, t, d, f)) or None.
+    Returns (result dict, list of tbl1 BSection values).
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source = Path(temp_dir) / "pec209.ydb"
+        destination = Path(temp_dir) / "out.db"
+        with closing(sqlite3.connect(str(source))) as connection:
+            connection.executescript("""
+                CREATE TABLE tblFloor (
+                    ID INTEGER, No_ INTEGER, Name TEXT, StdFlrID INTEGER,
+                    LevelB REAL, Height REAL
+                );
+                INSERT INTO tblFloor VALUES (1,1,'',10,0,3300);
+                CREATE TABLE tblJoint (
+                    ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                    X REAL, Y REAL, HDiff REAL
+                );
+                INSERT INTO tblJoint VALUES (1,1,10,0,0,0), (2,2,10,0,6000,0);
+                CREATE TABLE tblGrid (
+                    ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                    Jt1ID INTEGER, Jt2ID INTEGER
+                );
+                INSERT INTO tblGrid VALUES (11,1,10,1,2);
+                CREATE TABLE tblBeamSect (
+                    ID INTEGER, No_ INTEGER, Mat INTEGER, Kind INTEGER,
+                    ShapeVal TEXT, b REAL, h REAL, u REAL, t REAL, d REAL, f REAL
+                );
+                CREATE TABLE tblBeamSeg (
+                    ID INTEGER, No_ INTEGER, StdFlrID INTEGER, SectID INTEGER,
+                    GridID INTEGER, HDiff1 REAL, HDiff2 REAL
+                );
+                INSERT INTO tblBeamSeg VALUES (503,1,10,%d,11,0,0);
+                CREATE TABLE tblSubSectionSect (
+                    ID INTEGER, Kind INTEGER, No_ INTEGER, SubKind INTEGER,
+                    ShapeVal TEXT, b REAL, h REAL, u REAL, t REAL, d REAL, f REAL
+                );
+            """ % sect_id)
+            t, d, u, f = main_dims
+            connection.execute(
+                "INSERT INTO tblBeamSect VALUES (?,?,0,209,?,0,0,?,?,?,?)",
+                (sect_id, sect_id, "209,%d," % sect_id, u, t, d, f),
+            )
+            if subsection is not None:
+                if subsection[0] == "packed":
+                    connection.execute(
+                        "INSERT INTO tblSubSectionSect VALUES (?,12,1,26,?,0,0,0,0,0,0)",
+                        (sect_id, subsection[1]),
+                    )
+                else:
+                    b, h_, u_, t_, d_, f_ = subsection[1]
+                    connection.execute(
+                        "INSERT INTO tblSubSectionSect VALUES (?,12,1,13,'',?,?,?,?,?,?)",
+                        (sect_id, b, h_, u_, t_, d_, f_),
+                    )
+            connection.commit()
+        result = CONVERTER.convert_ydb(str(source), str(destination))
+        with closing(sqlite3.connect(str(destination))) as connection:
+            sections = [
+                row[0] for row in connection.execute("SELECT BSection FROM tbl1")
+            ]
+        return result, sections
+
+
 def create_anonymous_pec_fixture(path):
     """Create the smallest YDB-shaped database needed for a public regression test."""
     with closing(sqlite3.connect(path)) as connection:
@@ -530,6 +609,36 @@ class PecConversionTests(unittest.TestCase):
                     )
                 ]
         self.assertEqual(["H400X200X8X13@PEC"], sections)
+
+    def test_subsection_overrides_stale_main_values(self):
+        # 1117 类矛盾数据（handoff 2026-09-03）：主表 t/d/u/f 是陈旧值
+        # H350x150x6x11，子表 Kind-26 打包串为 HW200X200（YJK 界面所据）。
+        # 优先级规则：子表解码成功且校验通过 → 覆盖主表。
+        packed = build_packed_hot_rolled_value(903, "HW200X200", 200, 200)
+        result, sections = convert_single_209_beam(
+            (350.0, 150.0, 6.0, 11.0), ("packed", packed)
+        )
+        self.assertEqual(["H200X200X8X12@PEC"], sections)
+        self.assertEqual([], result["warnings"])
+
+    def test_packed_short_format_decodes(self):
+        # 短格式 11 字段子串（handoff §2.1）：[1..3]=选择器+名称 12 字节，
+        # [9]/[10]=b/h Q16；无 [14] 自定义标志与 [41] 尾部 ID 校验。
+        short = build_packed_short_value("HW200X200", 200, 200)
+        self.assertEqual(11, len(short.strip(",").split(",")))
+        result, sections = convert_single_209_beam(
+            (0.0, 0.0, 0.0, 0.0), ("packed", short)
+        )
+        self.assertEqual(["H200X200X8X12@PEC"], sections)
+        self.assertEqual([], result["warnings"])
+
+    def test_main_value_fallback_is_named_in_warnings(self):
+        # 无子表定义的 209 截面（如颛桥 12489 等 5 个）：仍取主表数值转换，
+        # 但必须在 result["warnings"] 中逐个点名，不静默。
+        result, sections = convert_single_209_beam((350.0, 150.0, 10.0, 16.0))
+        self.assertEqual(["H350X150X10X16@PEC"], sections)
+        self.assertEqual(1, len(result["warnings"]))
+        self.assertIn("SectID=903", result["warnings"][0])
 
     def test_section_text_contract_matches_csharp_parser(self):
         # 契约权威来源：CreateNewExtern/SectionTextParser.cs（只读参考仓库

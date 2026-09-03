@@ -228,11 +228,17 @@ STANDARD_HOT_ROLLED_H = {
 def _packed_hot_rolled_h_dimensions(subsection):
     """Decode a Kind-26 packed subsection ShapeVal into (h, b, tw, tf).
 
-    Layout per "YJK Kind26热轧H型钢与Kind209_YDB解析说明": 42 CSV integers,
-    [0]=26, [1..8]=selector(2B)+name(30B) blob, [9]=b Q16, [10]=h Q16,
-    [14]=custom flag, [41]=section ID.  Only the standard catalogue selector
-    (39) with a cross-validated name is accepted; everything else stays
-    unexplained and the caller rejects the section explicitly.
+    Two layouts share the same head (per "YJK Kind26热轧H型钢与Kind209_YDB解析说明"
+    and the plugin-side handoff "Kind26短格式解码与1117矛盾截面修正"):
+
+    * long  (>=42 CSV integers): [1..8]=32B selector+name blob, [9]=b Q16,
+      [10]=h Q16, [14]=custom flag (must be 0), [41]=tail ID (must match);
+    * short (>=11 CSV integers): [1..3]=12B selector+name blob, [9]=b Q16,
+      [10]=h Q16 — no custom-flag/tail-ID columns to check.
+
+    Only the standard catalogue selector (39) with a cross-validated name is
+    accepted; everything else stays unexplained so the caller can fall back
+    to main-table values (with a warning) or reject explicitly.
     """
     if subsection is None:
         return None
@@ -241,9 +247,16 @@ def _packed_hot_rolled_h_dimensions(subsection):
         fields = [int(part) for part in text.strip(",").split(",")]
     except ValueError:
         return None
-    if len(fields) < 42 or fields[0] != 26 or fields[14] != 0:
+    is_long = len(fields) >= 42
+    if len(fields) < 11 or fields[0] != 26:
         return None
-    blob = struct.pack("<8I", *fields[1:9])
+    if is_long:
+        if fields[14] != 0:      # 自定义截面不在国标表
+            return None
+        if fields[41] != _as_int(_value(subsection, "ID"), 0):
+            return None
+    blob = struct.pack("<8I" if is_long else "<3I",
+                       *(fields[1:9] if is_long else fields[1:4]))
     if blob[0] | (blob[1] << 8) != 39:
         return None
     name = blob[2:].split(b"\x00")[0]
@@ -253,8 +266,6 @@ def _packed_hot_rolled_h_dimensions(subsection):
         return None
     height = fields[10] / 65536.0
     width = fields[9] / 65536.0
-    if fields[41] != _as_int(_value(subsection, "ID"), 0):
-        return None
     parts = name.split("X")
     if len(parts) == 4 and parts[0].startswith("H") and not parts[0][1:3].isdigit():
         # 四段式自定义名称 "H400X200X8X13"：厚度直接在名称里。
@@ -290,6 +301,13 @@ def _h_dimensions(section, subsection=None):
         return None
     kind = _section_kind(section)
     if kind == 209:
+        # 优先级修订（handoff：Kind26短格式解码与1117矛盾截面修正）：子表
+        # Kind-26 打包定义（长/短格式）解码成功且校验通过时优先于主表
+        # t/d/u/f——主表数值在该类数据上可能是编辑残留的陈旧值（如 1117：
+        # 主表 H350x150x6x11 vs 子表 HW200X200，YJK 界面显示后者）。
+        packed = _packed_hot_rolled_h_dimensions(subsection)
+        if packed is not None:
+            return packed
         # YJK PEC beam/column: u=tw, t=H, d=W, f=tf.  The same values may
         # also be repeated in tblSubSectionSect.
         height = _first_positive(_value(section, "t"), _value(subsection, "t"), _value(subsection, "h"))
@@ -305,9 +323,6 @@ def _h_dimensions(section, subsection=None):
     else:
         return None
     if None in (height, width, web, flange):
-        # 主表与子表数值列都不全时，尝试子表 ShapeVal 里的 Kind-26 打包定义。
-        if kind == 209:
-            return _packed_hot_rolled_h_dimensions(subsection)
         return None
     return height, width, web, flange
 
@@ -571,11 +586,31 @@ def _convert_ydb_in_place(source_path, destination_path):
     # fail the conversion explicitly: emitting the raw ShapeVal with an @PEC
     # suffix would produce an unparseable section string downstream.
     unresolved_pec_sections = {}
+    # PEC sections that fell back to main-table t/d/u/f because no usable
+    # subsection exists (neither packed Kind-26 nor numeric columns): each
+    # must be named in the conversion warnings, never silently (handoff
+    # "Kind26短格式解码与1117矛盾截面修正" §2.3).
+    main_value_fallback_sections = {}
 
     def _note_unresolved_pec(member_kind, section, subsection):
         if _h_dimensions(section, subsection) is None:
             key = (member_kind, _value(section, "ID"))
             unresolved_pec_sections[key] = unresolved_pec_sections.get(key, 0) + 1
+
+    def _note_main_value_fallback(member_kind, section, subsection):
+        if _section_kind(section) != 209:
+            return
+        if _h_dimensions(section, subsection) is None:
+            return  # 无尺寸路径由显式拒绝负责
+        if _packed_hot_rolled_h_dimensions(subsection) is not None:
+            return  # 子表打包定义为准（优先级规则）
+        if subsection is not None and any(
+            _first_positive(_value(subsection, name)) is not None
+            for name in ("t", "d", "u", "f", "h", "b")
+        ):
+            return  # 子表数值列有效——规范 §4.2 的正常形态
+        key = (member_kind, _value(section, "ID"))
+        main_value_fallback_sections[key] = main_value_fallback_sections.get(key, 0) + 1
 
     for floor in floors:
         standard_floor_id = _value(floor, "StdFlrID")
@@ -591,6 +626,9 @@ def _convert_ydb_in_place(source_path, destination_path):
             section = beam_sections.get(_value(segment, "SectID"))
             if _section_kind(section) == 209:
                 _note_unresolved_pec(
+                    "梁", section, subsections.get(_value(segment, "SectID"))
+                )
+                _note_main_value_fallback(
                     "梁", section, subsections.get(_value(segment, "SectID"))
                 )
                 section_text = _h_section_name(
@@ -650,6 +688,10 @@ def _convert_ydb_in_place(source_path, destination_path):
                 _note_unresolved_pec(
                     "柱", section, subsections.get(_value(segment, "SectID"))
                 )
+                if kind == 209:
+                    _note_main_value_fallback(
+                        "柱", section, subsections.get(_value(segment, "SectID"))
+                    )
             section_text = (
                 _h_section_name(section, subsections.get(_value(segment, "SectID")), pec=True)
                 if is_pec_h else _legacy_section_text(section)
@@ -928,6 +970,17 @@ def _convert_ydb_in_place(source_path, destination_path):
         destination.close()
         source.close()
 
+    warnings = []
+    if main_value_fallback_sections:
+        warnings = [
+            "%s截面 SectID=%s 无子表定义，截面取主表数值（%d 根构件）" % (
+                member_kind, sect_id, count)
+            for (member_kind, sect_id), count in sorted(
+                main_value_fallback_sections.items(),
+                key=lambda item: (item[0][0], _as_int(item[0][1])),
+            )
+        ]
+
     return {
         "source": str(source_path),
         "destination": str(destination_path),
@@ -936,6 +989,7 @@ def _convert_ydb_in_place(source_path, destination_path):
         "levels": len(tbl3_rows),
         "wall_legs": len(tbl4_rows),
         "pec_wall_groups": group_counter,
+        "warnings": warnings,
     }
 
 
