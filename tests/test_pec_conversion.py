@@ -509,6 +509,56 @@ class PecConversionTests(unittest.TestCase):
             rows,
         )
 
+    def test_tbl3_includes_member_elevation_supplement(self):
+        # 方案A：降标高（层间）梁的端点 Z 不落在任何楼层底/顶上时，
+        # tbl3 必须补充该标高行（续 RFn 命名），插件才能为它创建 Level。
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "drop.ydb"
+            destination = Path(temp_dir) / "out.db"
+            with closing(sqlite3.connect(str(source))) as connection:
+                connection.executescript("""
+                    CREATE TABLE tblFloor (
+                        ID INTEGER, No_ INTEGER, Name TEXT, StdFlrID INTEGER,
+                        LevelB REAL, Height REAL
+                    );
+                    INSERT INTO tblFloor VALUES (1,1,'',10,0,3000);
+                    CREATE TABLE tblJoint (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        X REAL, Y REAL, HDiff REAL
+                    );
+                    INSERT INTO tblJoint VALUES (1,1,10,0,0,0), (2,2,10,6000,0,0);
+                    CREATE TABLE tblGrid (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        Jt1ID INTEGER, Jt2ID INTEGER
+                    );
+                    INSERT INTO tblGrid VALUES (11,1,10,1,2);
+                    CREATE TABLE tblBeamSect (
+                        ID INTEGER, No_ INTEGER, Mat INTEGER, Kind INTEGER,
+                        ShapeVal TEXT, b REAL, h REAL, u REAL, t REAL, d REAL, f REAL
+                    );
+                    INSERT INTO tblBeamSect VALUES (601,1,0,1,'1,200,400,6,601,',
+                        200,400,0,0,0,0);
+                    CREATE TABLE tblBeamSeg (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER, SectID INTEGER,
+                        GridID INTEGER, HDiff1 REAL, HDiff2 REAL
+                    );
+                    -- 楼层顶 3000，梁降 1500 → 构件标高 1500
+                    INSERT INTO tblBeamSeg VALUES (602,1,10,601,11,-1500,-1500);
+                """)
+                connection.commit()
+            CONVERTER.convert_ydb(str(source), str(destination))
+            with closing(sqlite3.connect(str(destination))) as connection:
+                rows = [
+                    (name, round(elevation, 6))
+                    for name, elevation in connection.execute(
+                        "SELECT Floor,LevelB FROM tbl3"
+                    )
+                ]
+        self.assertEqual(
+            [("1F", 0.0), ("RF", 3000.0), ("RF2", 1500.0)],
+            rows,
+        )
+
     def test_dimensionless_pec_section_fails_explicitly(self):
         # A Kind-209 section with no dimensions anywhere must abort the
         # conversion naming the section, never emit an unparseable @PEC string.

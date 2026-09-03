@@ -910,6 +910,20 @@ def _convert_ydb_in_place(source_path, destination_path):
         if len(tbl3_rows) > previous:
             intermediate_index += 1
 
+    # 构件实际标高补集（方案A，2026-09-03）：降标高/层间梁等构件端点 Z 若
+    # 不落在任何楼层底/顶上，补充标高行（续 RFn 命名）。插件的建模模型是
+    # "tbl3 每行 → 创建一个 Level → 构件按 Z 找同标高 Level 挂接"，缺了
+    # 这行，该构件就会因找不到标高而被跳过（如颛桥 Z=400 的 329 根梁）。
+    for rows in (tbl1_rows, tbl2_rows, tbl4_rows):
+        for row in rows:
+            for elevation in (row[2], row[5]):
+                if elevation is None:
+                    continue
+                previous = len(tbl3_rows)
+                _add_level("RF" + str(intermediate_index + 1), elevation)
+                if len(tbl3_rows) > previous:
+                    intermediate_index += 1
+
     destination = sqlite3.connect(str(destination_path))
     try:
         with destination:

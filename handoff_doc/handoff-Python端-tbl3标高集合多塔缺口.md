@@ -83,3 +83,22 @@ for index, floor in enumerate(floors):                              # 补各层�
 * 楼层数据见 `颛桥测试版\dtlmodel.ydb` 的 tblFloor；
 * C# 端标高匹配：`CreateNewExtern\SqliteDataToRevit.cs` 的 `FindLevelAtElevation`（1mm 容差）；
 * 相关背景：`handoff_doc/handoff-python-PEC墙提取与Revit建模.md`（表契约总则）。
+
+
+## 7. 契约扩展：构件实际标高补集（2026-09-03，方案A）
+
+多塔缺口修复上线后，颛桥仍有 329 根"降标高（层间）梁"缺失（网格 152/154 等，
+端点 Z=400：楼层顶 1900 + HDiff −1500）。其 Z 不落在任何楼层底/顶上，属
+§2 集合定义之外的第三类标高。经论证在 Python 端扩展集合定义：
+
+```text
+标高集合 = ∪楼层底 ∪ ∪楼层顶 ∪ 构件实际标高补集
+构件实际标高补集 = { tbl1/tbl2/tbl4 全部端点 Z } − { 楼层底 ∪ 楼层顶 }
+```
+
+* 新增行续用 RFn 命名（不与任何已有名重复），去重容差不变（1e-6）；
+* 颛桥实测：tbl3 由 17 行 → 18 行，新增 RF3@400；其余 17 行零变化；
+* 连续且无降标高构件的模型补集为空 → 输出与扩展前逐行一致（零回归，
+  回归测试 test_tbl3_includes_member_elevation_supplement 锁定）；
+* 插件端零改动；Revit 侧表现为多出一条真实标高线（RF3@400），
+  降标高梁挂接其上。**不使用**"起点/终点标高偏移"参数路径。
