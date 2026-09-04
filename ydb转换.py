@@ -614,17 +614,18 @@ def _convert_ydb_in_place(source_path, destination_path):
                 )
             return coordinates[cache_key]
 
-        def turn_degrees(a, m, b):
+        def turn_and_sign(a, m, b):
             pa, pm, pb = node_xy(*a), node_xy(*m), node_xy(*b)
             if pa is None or pm is None or pb is None:
-                return None
+                return None, 0
             v1 = (pm[0] - pa[0], pm[1] - pa[1])
             v2 = (pb[0] - pm[0], pb[1] - pm[1])
             n1, n2 = math.hypot(*v1), math.hypot(*v2)
             if n1 < 1.0 or n2 < 1.0:
-                return None
+                return None, 0
             cosine = max(-1.0, min(1.0, (v1[0] * v2[0] + v1[1] * v2[1]) / (n1 * n2)))
-            return math.degrees(math.acos(cosine))
+            cross = v1[0] * v2[1] - v1[1] * v2[0]
+            return math.degrees(math.acos(cosine)), (1 if cross > 0 else -1 if cross < 0 else 0)
 
         marked = set()
         visited = set()
@@ -637,6 +638,8 @@ def _convert_ydb_in_place(source_path, destination_path):
                 chain = [segment_id]
                 visited.add(segment_id)
                 previous, current = start_node, next_node
+                chain_sign = 0
+                chain_turn_total = 0.0
                 while True:
                     successor = None
                     for candidate in adjacency.get((floor_id, current), []):
@@ -644,20 +647,28 @@ def _convert_ydb_in_place(source_path, destination_path):
                             continue
                         other_floor, ca, cb = segments[candidate]
                         other_node = cb if ca == current else ca
-                        angle = turn_degrees(
+                        angle, sign = turn_and_sign(
                             (floor_id, previous), (floor_id, current),
                             (floor_id, other_node),
                         )
-                        if angle is not None and 0.03 <= angle <= 15.0:
-                            successor = (candidate, other_node)
-                            break
+                        if angle is None or not 0.1 <= angle <= 40.0:
+                            continue
+                        # 单调转向：真弧各节点转角同方向；直梁坐标抖动方向随机。
+                        if chain_sign and sign and sign != chain_sign:
+                            continue
+                        successor = (candidate, other_node, angle, sign)
+                        break
                     if successor is None:
                         break
-                    candidate, other_node = successor
+                    candidate, other_node, angle, sign = successor
                     visited.add(candidate)
                     chain.append(candidate)
+                    chain_turn_total += angle
+                    if sign:
+                        chain_sign = sign
                     previous, current = current, other_node
-                if len(chain) >= 3:
+                # 累计转角下限：整链弯曲不足的近直链（漂移）不标。
+                if len(chain) >= 3 and chain_turn_total >= 1.5:
                     marked.update(chain)
                     break
         return marked
