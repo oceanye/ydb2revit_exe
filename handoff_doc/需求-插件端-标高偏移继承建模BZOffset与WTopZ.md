@@ -1,6 +1,6 @@
 # 需求：CreateNewExtern 插件 · 标高偏移继承建模（BZOffset / WTopZ）
 
-版本：v3（2026-09-04，增补墙顶两端 HDiff：WTopZ/WTopZ2，支持斜顶墙）
+版本：v4（2026-09-04，BZOffset 基准改为"偏移绝对值最小的层标高"，平手取层顶）
 提出方：Python 转换器侧（E:\ydb2revit_exe）
 接收方：CreateNewExtern 插件维护（源码 `E:\revit-external-tool2.git`，
 部署 `C:\ProgramData\Autodesk\Revit\Addins\2018\CreateNewExtern.dll`）
@@ -15,7 +15,7 @@ Python 侧**已落地**的数据契约（tbl3 已回到"楼层底∪楼层顶"�
 
 | 表 | 末尾追加列 | 语义 |
 |---|---|---|
-| `tbl1` | `BZOffset REAL`、`BZOffset2 REAL`（mm，带符号） | 梁**起点/终点**相对**本层层顶标高**的偏移；普通梁 = 0；降标高（层间）梁如颛桥 2F 为 −1500（169 根） |
+| `tbl1` | `BZOffset REAL`、`BZOffset2 REAL`（mm，带符号） | 梁**起点/终点**相对**偏移绝对值最小的层标高**（本层底或层顶，平手取层顶；基准由起端 Z 判定，两端同基准）的偏移；普通梁 = 0（即挂本层标高）；降标高梁如颛桥 2F 挂层顶 1900、偏移 −1500（169 根）。已全量校验：BStartZ − BZOffset 必落在 tbl3 某标高上（7557 根零违例） |
 | `tbl4` | `WTopZ REAL`、`WTopZ2 REAL`（mm，绝对标高） | 墙**起端/终端真实顶标高** = 层顶 + tblWallSeg.HDiff1/HDiff2。平顶墙两列相等；斜顶墙两列不同（如颛桥 2F 一段 400→1900）。颛桥 2F 实测：9 段 400/400、1 段 400/1900、60 段 1900/1900 |
 
 ## 2. 插件端修改点

@@ -614,7 +614,8 @@ def _convert_ydb_in_place(source_path, destination_path):
 
     for floor in floors:
         standard_floor_id = _value(floor, "StdFlrID")
-        top_z = _as_float(_value(floor, "LevelB")) + _as_float(_value(floor, "Height"))
+        bottom_z = _as_float(_value(floor, "LevelB"))
+        top_z = bottom_z + _as_float(_value(floor, "Height"))
         for segment in beam_segments_by_floor.get(standard_floor_id, []):
             grid = grid_for(standard_floor_id, _value(segment, "GridID"))
             if grid is None:
@@ -638,6 +639,12 @@ def _convert_ydb_in_place(source_path, destination_path):
                 section_text = _legacy_section_text(section)
             start_z = top_z + _as_float(_value(joint1, "HDiff")) + _as_float(_value(segment, "HDiff1"))
             end_z = top_z + _as_float(_value(joint2, "HDiff")) + _as_float(_value(segment, "HDiff2"))
+            # 偏移继承契约：挂"偏移绝对值最小"的层标高（本层底或本层顶，
+            # 平手取层顶）；基准由起端 Z 判定，两端偏移同基准。
+            beam_ref_z = (
+                top_z if abs(start_z - top_z) <= abs(start_z - bottom_z)
+                else bottom_z
+            )
             start_connection, end_connection = _connection_values(
                 properties, _value(segment, "ID"), "SpBeam"
             )
@@ -649,7 +656,7 @@ def _convert_ydb_in_place(source_path, destination_path):
                 _value(segment, "Ecc", 0),
                 _value(segment, "Ecc2", _value(segment, "Ecc", 0)),
                 _value(segment, "Rotation", 0),
-                start_z - top_z, end_z - top_z,
+                start_z - beam_ref_z, end_z - beam_ref_z,
             ))
 
         for segment in brace_segments_by_floor.get(standard_floor_id, []):
@@ -660,12 +667,16 @@ def _convert_ydb_in_place(source_path, destination_path):
             section = brace_sections.get(_value(segment, "SectID"))
             brace_start_z = top_z + _as_float(_value(joint1, "HDiff")) + _as_float(_value(segment, "HDiff1"))
             brace_end_z = top_z + _as_float(_value(joint2, "HDiff")) + _as_float(_value(segment, "HDiff2"))
+            brace_ref_z = (
+                top_z if abs(brace_start_z - top_z) <= abs(brace_start_z - bottom_z)
+                else bottom_z
+            )
             tbl1_rows.append((
                 _value(joint1, "X"), _value(joint1, "Y"), brace_start_z,
                 _value(joint2, "X"), _value(joint2, "Y"), brace_end_z,
                 _legacy_section_text(section), 0, len(tbl1_rows) + 1, None,
                 0, 0, 0, 0, 0,
-                brace_start_z - top_z, brace_end_z - top_z,
+                brace_start_z - brace_ref_z, brace_end_z - brace_ref_z,
             ))
 
     tbl2_rows = []

@@ -565,6 +565,52 @@ class PecConversionTests(unittest.TestCase):
         self.assertEqual([("1F", 0.0), ("RF", 3000.0)], levels)
         self.assertEqual([(-1500.0, -1500.0)], beams)
 
+    def test_deep_dropped_beam_attaches_to_nearest_level(self):
+        # 偏移绝对值最小规则：降深超过半层高的梁改挂本层底标高
+        # （层高 3000、梁降 3000 → Z=0，挂 1F@0、偏移 0，而非层顶 −3000）。
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "deep.ydb"
+            destination = Path(temp_dir) / "out.db"
+            with closing(sqlite3.connect(str(source))) as connection:
+                connection.executescript("""
+                    CREATE TABLE tblFloor (
+                        ID INTEGER, No_ INTEGER, Name TEXT, StdFlrID INTEGER,
+                        LevelB REAL, Height REAL
+                    );
+                    INSERT INTO tblFloor VALUES (1,1,'',10,0,3000);
+                    CREATE TABLE tblJoint (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        X REAL, Y REAL, HDiff REAL
+                    );
+                    INSERT INTO tblJoint VALUES (1,1,10,0,0,0), (2,2,10,6000,0,0);
+                    CREATE TABLE tblGrid (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        Jt1ID INTEGER, Jt2ID INTEGER
+                    );
+                    INSERT INTO tblGrid VALUES (11,1,10,1,2);
+                    CREATE TABLE tblBeamSect (
+                        ID INTEGER, No_ INTEGER, Mat INTEGER, Kind INTEGER,
+                        ShapeVal TEXT, b REAL, h REAL, u REAL, t REAL, d REAL, f REAL
+                    );
+                    INSERT INTO tblBeamSect VALUES (601,1,0,1,'1,200,400,6,601,',
+                        200,400,0,0,0,0);
+                    CREATE TABLE tblBeamSeg (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER, SectID INTEGER,
+                        GridID INTEGER, HDiff1 REAL, HDiff2 REAL
+                    );
+                    INSERT INTO tblBeamSeg VALUES (603,1,10,601,11,-3000,-3000);
+                """)
+                connection.commit()
+            CONVERTER.convert_ydb(str(source), str(destination))
+            with closing(sqlite3.connect(str(destination))) as connection:
+                offsets = [
+                    (round(row[0], 6), round(row[1], 6), round(row[2], 6))
+                    for row in connection.execute(
+                        "SELECT BZOffset,BZOffset2,BStartZ FROM tbl1"
+                    )
+                ]
+        self.assertEqual([(0.0, 0.0, 0.0)], offsets)
+
     def test_wall_top_offsets_extracted(self):
         # 墙顶标高调整：tblWallSeg.HDiff1/HDiff2 为墙两端顶标高差。
         # 平顶墙（两端同值）→ WTopZ=WTopZ2；斜顶墙（两端不同）→ 两列不同。
