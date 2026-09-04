@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import sqlite3
+import struct
 import tempfile
 import unittest
 from contextlib import closing
@@ -12,6 +13,100 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("ydb_converter", ROOT / "ydb转换.py")
 CONVERTER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CONVERTER)
+
+
+def build_packed_hot_rolled_value(section_id, name, height, width):
+    """Build a Kind-26 packed subsection ShapeVal exactly like YJK 8.1 does."""
+    blob = struct.pack("<H", 39) + name.encode("ascii").ljust(30, b"\x00")
+    fields = [26]
+    fields.extend(struct.unpack("<8I", blob))
+    fields.append(int(width * 65536))    # [9]  翼缘宽 Q16
+    fields.append(int(height * 65536))   # [10] 总高 Q16
+    fields.extend([0, 0, 0])             # [11..13]
+    fields.append(0)                     # [14] 自定义标志：标准热轧
+    fields.append(327680)                # [15] 材料 Q16 = 5
+    fields.extend([0] * (41 - len(fields)))
+    fields.append(section_id)            # [41] 尾部截面 ID
+    return ",".join(str(value) for value in fields) + ","
+
+
+def build_packed_short_value(name, height, width):
+    """Build the 11-field short Kind-26 packed form (handoff 2026-09-03)."""
+    blob = struct.pack("<H", 39) + name.encode("ascii").ljust(10, b"\x00")
+    blob = blob[:12]
+    fields = [26]
+    fields.extend(struct.unpack("<3I", blob))   # [1..3] 选择器+名称 12 字节
+    fields.extend([0, 0, 0, 0, 0])              # [4..8]
+    fields.append(int(width * 65536))           # [9]
+    fields.append(int(height * 65536))          # [10]
+    return ",".join(str(value) for value in fields) + ","
+
+
+def convert_single_209_beam(main_dims, subsection=None, sect_id=903):
+    """Convert a one-beam YDB with a configurable Kind-209 section.
+
+    main_dims = (t, d, u, f) written to tblBeamSect; subsection is
+    ("packed", shapeval_text) or ("numeric", (b, h, u, t, d, f)) or None.
+    Returns (result dict, list of tbl1 BSection values).
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source = Path(temp_dir) / "pec209.ydb"
+        destination = Path(temp_dir) / "out.db"
+        with closing(sqlite3.connect(str(source))) as connection:
+            connection.executescript("""
+                CREATE TABLE tblFloor (
+                    ID INTEGER, No_ INTEGER, Name TEXT, StdFlrID INTEGER,
+                    LevelB REAL, Height REAL
+                );
+                INSERT INTO tblFloor VALUES (1,1,'',10,0,3300);
+                CREATE TABLE tblJoint (
+                    ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                    X REAL, Y REAL, HDiff REAL
+                );
+                INSERT INTO tblJoint VALUES (1,1,10,0,0,0), (2,2,10,0,6000,0);
+                CREATE TABLE tblGrid (
+                    ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                    Jt1ID INTEGER, Jt2ID INTEGER
+                );
+                INSERT INTO tblGrid VALUES (11,1,10,1,2);
+                CREATE TABLE tblBeamSect (
+                    ID INTEGER, No_ INTEGER, Mat INTEGER, Kind INTEGER,
+                    ShapeVal TEXT, b REAL, h REAL, u REAL, t REAL, d REAL, f REAL
+                );
+                CREATE TABLE tblBeamSeg (
+                    ID INTEGER, No_ INTEGER, StdFlrID INTEGER, SectID INTEGER,
+                    GridID INTEGER, HDiff1 REAL, HDiff2 REAL
+                );
+                INSERT INTO tblBeamSeg VALUES (503,1,10,%d,11,0,0);
+                CREATE TABLE tblSubSectionSect (
+                    ID INTEGER, Kind INTEGER, No_ INTEGER, SubKind INTEGER,
+                    ShapeVal TEXT, b REAL, h REAL, u REAL, t REAL, d REAL, f REAL
+                );
+            """ % sect_id)
+            t, d, u, f = main_dims
+            connection.execute(
+                "INSERT INTO tblBeamSect VALUES (?,?,0,209,?,0,0,?,?,?,?)",
+                (sect_id, sect_id, "209,%d," % sect_id, u, t, d, f),
+            )
+            if subsection is not None:
+                if subsection[0] == "packed":
+                    connection.execute(
+                        "INSERT INTO tblSubSectionSect VALUES (?,12,1,26,?,0,0,0,0,0,0)",
+                        (sect_id, subsection[1]),
+                    )
+                else:
+                    b, h_, u_, t_, d_, f_ = subsection[1]
+                    connection.execute(
+                        "INSERT INTO tblSubSectionSect VALUES (?,12,1,13,'',?,?,?,?,?,?)",
+                        (sect_id, b, h_, u_, t_, d_, f_),
+                    )
+            connection.commit()
+        result = CONVERTER.convert_ydb(str(source), str(destination))
+        with closing(sqlite3.connect(str(destination))) as connection:
+            sections = [
+                row[0] for row in connection.execute("SELECT BSection FROM tbl1")
+            ]
+        return result, sections
 
 
 def create_anonymous_pec_fixture(path):
@@ -130,7 +225,7 @@ class PecConversionTests(unittest.TestCase):
             columns = [row[1] for row in connection.execute("PRAGMA table_info(tbl4)")]
         self.assertEqual(expected, columns[:12])
         self.assertEqual(
-            ["WGroupID", "WLegID", "WLegRole", "WShape", "WInfo"],
+            ["WGroupID", "WLegID", "WLegRole", "WShape", "WInfo", "WTopZ", "WTopZ2"],
             columns[12:],
         )
 
@@ -139,8 +234,8 @@ class PecConversionTests(unittest.TestCase):
             beam_sections = [row[0] for row in connection.execute("SELECT BSection FROM tbl1")]
             column_sections = [row[0] for row in connection.execute("SELECT CSection FROM tbl2")]
             column_columns = [row[1] for row in connection.execute("PRAGMA table_info(tbl2)")]
-        self.assertEqual(["H400x150x10x20@PEC"], beam_sections)
-        self.assertEqual(["H244x175x8x12@PEC"] * 4, column_sections)
+        self.assertEqual(["H400X150X10X20@PEC"], beam_sections)
+        self.assertEqual(["H244X175X8X12@PEC"] * 4, column_sections)
         self.assertFalse(any(name.startswith("Ydb") for name in column_columns))
 
     def test_l_and_i_wall_groups_are_traceable(self):
@@ -311,8 +406,8 @@ class PecConversionTests(unittest.TestCase):
                 "SELECT CSection,EccX,EccY,Rotation FROM tbl2 ORDER BY ID"
             ).fetchall()
             sections = [row[0] for row in rows]
-        self.assertEqual(["H244x175x8x12@PEC"] * 4, sections[:4])
-        self.assertEqual("H400x200x8x16@PEC", sections[4])
+        self.assertEqual(["H244X175X8X12@PEC"] * 4, sections[:4])
+        self.assertEqual("H400X200X8X16@PEC", sections[4])
         self.assertEqual((7.0, 8.0, 9.0), rows[4][1:])
 
     def test_kind2_column_at_secondary_outer_end_is_not_a_main_end_column(self):
@@ -345,6 +440,514 @@ class PecConversionTests(unittest.TestCase):
         self.assertEqual(189, wall_count)
         self.assertEqual(0, pec_count)
         self.assertEqual(0, subsection_exists)
+
+    @staticmethod
+    def _convert_floors_fixture(floors):
+        """Convert a floors-only YDB and return the tbl3 rows (name, elevation)."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "floors.ydb"
+            destination = Path(temp_dir) / "out.db"
+            with closing(sqlite3.connect(str(source))) as connection:
+                connection.executescript("""
+                    CREATE TABLE tblFloor (
+                        ID INTEGER, No_ INTEGER, Name TEXT, StdFlrID INTEGER,
+                        LevelB REAL, Height REAL
+                    );
+                    CREATE TABLE tblJoint (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        X REAL, Y REAL, HDiff REAL
+                    );
+                    CREATE TABLE tblGrid (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        Jt1ID INTEGER, Jt2ID INTEGER
+                    );
+                """)
+                connection.executemany(
+                    "INSERT INTO tblFloor VALUES (?,?,'',?, ?, ?)",
+                    [(i, i, i, level_b, height)
+                     for i, (level_b, height) in enumerate(floors, start=1)],
+                )
+                connection.commit()
+            CONVERTER.convert_ydb(str(source), str(destination))
+            with closing(sqlite3.connect(str(destination))) as connection:
+                return [
+                    (name, round(elevation, 6))
+                    for name, elevation in connection.execute(
+                        "SELECT Floor,LevelB FROM tbl3"
+                    )
+                ]
+
+    def test_tbl3_includes_detached_intermediate_tops(self):
+        # Multi-tower shape from handoff-Python端-tbl3标高集合多塔缺口.md:
+        # an absorbed top, a detached (sloped-roof) top, a duplicated bottom
+        # and a tower restart must all appear in the level set exactly once.
+        rows = self._convert_floors_fixture([
+            (0.0, 3000.0),     # top 3000 absorbed by the next bottom
+            (3000.0, 2295.0),  # top 5295 detached -> RF2
+            (5100.0, 2800.0),  # tower restart; top 7900 detached -> RF3
+            (5100.0, 1000.0),  # duplicated bottom deduplicated; last top -> RF
+        ])
+        self.assertEqual(
+            [("1F", 0.0), ("2F", 3000.0), ("3F", 5100.0),
+             ("RF", 6100.0), ("RF2", 5295.0), ("RF3", 7900.0)],
+            rows,
+        )
+        names = [name for name, _ in rows]
+        self.assertEqual(len(names), len(set(names)), "level names must be unique")
+        self.assertEqual(1, names.count("RF"))
+
+    def test_tbl3_continuous_model_output_unchanged(self):
+        # In a continuous single-tower model every interior top equals the next
+        # bottom, so tbl3 must stay identical to the legacy bottoms+RF output.
+        rows = self._convert_floors_fixture([
+            (0.0, 3000.0),
+            (3000.0, 3300.0),
+            (6300.0, 3600.0),
+        ])
+        self.assertEqual(
+            [("1F", 0.0), ("2F", 3000.0), ("3F", 6300.0), ("RF", 9900.0)],
+            rows,
+        )
+
+    def test_dropped_beam_extracts_level_offsets(self):
+        # 偏移继承契约：降标高（层间）梁的端点 Z 不落在楼层底/顶上时，
+        # tbl3 不再补标高行（避免截断墙高），改在 tbl1 末尾输出
+        # BZOffset/BZOffset2（相对本层层顶的带符号偏移），插件端用
+        # "起点/终点标高偏移"参数继承建模。
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "drop.ydb"
+            destination = Path(temp_dir) / "out.db"
+            with closing(sqlite3.connect(str(source))) as connection:
+                connection.executescript("""
+                    CREATE TABLE tblFloor (
+                        ID INTEGER, No_ INTEGER, Name TEXT, StdFlrID INTEGER,
+                        LevelB REAL, Height REAL
+                    );
+                    INSERT INTO tblFloor VALUES (1,1,'',10,0,3000);
+                    CREATE TABLE tblJoint (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        X REAL, Y REAL, HDiff REAL
+                    );
+                    INSERT INTO tblJoint VALUES (1,1,10,0,0,0), (2,2,10,6000,0,0);
+                    CREATE TABLE tblGrid (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        Jt1ID INTEGER, Jt2ID INTEGER
+                    );
+                    INSERT INTO tblGrid VALUES (11,1,10,1,2);
+                    CREATE TABLE tblBeamSect (
+                        ID INTEGER, No_ INTEGER, Mat INTEGER, Kind INTEGER,
+                        ShapeVal TEXT, b REAL, h REAL, u REAL, t REAL, d REAL, f REAL
+                    );
+                    INSERT INTO tblBeamSect VALUES (601,1,0,1,'1,200,400,6,601,',
+                        200,400,0,0,0,0);
+                    CREATE TABLE tblBeamSeg (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER, SectID INTEGER,
+                        GridID INTEGER, HDiff1 REAL, HDiff2 REAL
+                    );
+                    -- 楼层顶 3000，梁降 1500 → 构件标高 1500，偏移 -1500
+                    INSERT INTO tblBeamSeg VALUES (602,1,10,601,11,-1500,-1500);
+                """)
+                connection.commit()
+            CONVERTER.convert_ydb(str(source), str(destination))
+            with closing(sqlite3.connect(str(destination))) as connection:
+                levels = [
+                    (name, round(elevation, 6))
+                    for name, elevation in connection.execute(
+                        "SELECT Floor,LevelB FROM tbl3"
+                    )
+                ]
+                beams = [
+                    (round(row[0], 6), round(row[1], 6))
+                    for row in connection.execute(
+                        "SELECT BZOffset,BZOffset2 FROM tbl1"
+                    )
+                ]
+        self.assertEqual([("1F", 0.0), ("RF", 3000.0)], levels)
+        self.assertEqual([(-1500.0, -1500.0)], beams)
+
+    def test_deep_dropped_beam_attaches_to_nearest_level(self):
+        # 偏移绝对值最小规则：降深超过半层高的梁改挂本层底标高
+        # （层高 3000、梁降 3000 → Z=0，挂 1F@0、偏移 0，而非层顶 −3000）。
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "deep.ydb"
+            destination = Path(temp_dir) / "out.db"
+            with closing(sqlite3.connect(str(source))) as connection:
+                connection.executescript("""
+                    CREATE TABLE tblFloor (
+                        ID INTEGER, No_ INTEGER, Name TEXT, StdFlrID INTEGER,
+                        LevelB REAL, Height REAL
+                    );
+                    INSERT INTO tblFloor VALUES (1,1,'',10,0,3000);
+                    CREATE TABLE tblJoint (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        X REAL, Y REAL, HDiff REAL
+                    );
+                    INSERT INTO tblJoint VALUES (1,1,10,0,0,0), (2,2,10,6000,0,0);
+                    CREATE TABLE tblGrid (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        Jt1ID INTEGER, Jt2ID INTEGER
+                    );
+                    INSERT INTO tblGrid VALUES (11,1,10,1,2);
+                    CREATE TABLE tblBeamSect (
+                        ID INTEGER, No_ INTEGER, Mat INTEGER, Kind INTEGER,
+                        ShapeVal TEXT, b REAL, h REAL, u REAL, t REAL, d REAL, f REAL
+                    );
+                    INSERT INTO tblBeamSect VALUES (601,1,0,1,'1,200,400,6,601,',
+                        200,400,0,0,0,0);
+                    CREATE TABLE tblBeamSeg (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER, SectID INTEGER,
+                        GridID INTEGER, HDiff1 REAL, HDiff2 REAL
+                    );
+                    INSERT INTO tblBeamSeg VALUES (603,1,10,601,11,-3000,-3000);
+                """)
+                connection.commit()
+            CONVERTER.convert_ydb(str(source), str(destination))
+            with closing(sqlite3.connect(str(destination))) as connection:
+                offsets = [
+                    (round(row[0], 6), round(row[1], 6), round(row[2], 6))
+                    for row in connection.execute(
+                        "SELECT BZOffset,BZOffset2,BStartZ FROM tbl1"
+                    )
+                ]
+        self.assertEqual([(0.0, 0.0, 0.0)], offsets)
+
+    def test_wall_top_offsets_extracted(self):
+        # 墙顶标高调整：tblWallSeg.HDiff1/HDiff2 为墙两端顶标高差。
+        # 平顶墙（两端同值）→ WTopZ=WTopZ2；斜顶墙（两端不同）→ 两列不同。
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "walltop.ydb"
+            destination = Path(temp_dir) / "out.db"
+            with closing(sqlite3.connect(str(source))) as connection:
+                connection.executescript("""
+                    CREATE TABLE tblFloor (
+                        ID INTEGER, No_ INTEGER, Name TEXT, StdFlrID INTEGER,
+                        LevelB REAL, Height REAL
+                    );
+                    INSERT INTO tblFloor VALUES (1,1,'',10,0,3000);
+                    CREATE TABLE tblJoint (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        X REAL, Y REAL, HDiff REAL
+                    );
+                    INSERT INTO tblJoint VALUES
+                        (1,1,10,0,0,0), (2,2,10,6000,0,0), (3,3,10,12000,0,0);
+                    CREATE TABLE tblGrid (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        Jt1ID INTEGER, Jt2ID INTEGER
+                    );
+                    INSERT INTO tblGrid VALUES (11,1,10,1,2), (12,2,10,2,3);
+                    CREATE TABLE tblWallSect (
+                        ID INTEGER, No_ INTEGER, Mat INTEGER, Kind INTEGER,
+                        B REAL, H REAL, T2 REAL, Dis REAL, Dis1 REAL
+                    );
+                    INSERT INTO tblWallSect VALUES (701,1,1,1,300,0,0,0,0);
+                    CREATE TABLE tblWallSeg (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER, SectID INTEGER,
+                        GridID INTEGER, HDiff1 REAL, HDiff2 REAL
+                    );
+                    -- 平顶降墙：顶 3000-1500=1500
+                    INSERT INTO tblWallSeg VALUES (711,1,10,701,11,-1500,-1500);
+                    -- 斜顶墙：起端顶 1500、终端顶 3000
+                    INSERT INTO tblWallSeg VALUES (712,2,10,701,12,-1500,0);
+                """)
+                connection.commit()
+            CONVERTER.convert_ydb(str(source), str(destination))
+            with closing(sqlite3.connect(str(destination))) as connection:
+                tops = [
+                    (round(row[0], 6), round(row[1], 6))
+                    for row in connection.execute(
+                        "SELECT WTopZ,WTopZ2 FROM tbl4 ORDER BY ID"
+                    )
+                ]
+        self.assertEqual([(1500.0, 1500.0), (1500.0, 3000.0)], tops)
+
+    def test_node_elevation_drives_column_top_and_wall_top(self):
+        # 节点标高差（tblJoint.HDiff）机制：柱顶=层顶+节点HDiff（随梁平齐）；
+        # 墙顶=层顶+墙段HDiff+端节点HDiff（弧形边缘墙仅节点带值）。
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "node.ydb"
+            destination = Path(temp_dir) / "out.db"
+            with closing(sqlite3.connect(str(source))) as connection:
+                connection.executescript("""
+                    CREATE TABLE tblFloor (
+                        ID INTEGER, No_ INTEGER, Name TEXT, StdFlrID INTEGER,
+                        LevelB REAL, Height REAL
+                    );
+                    INSERT INTO tblFloor VALUES (1,1,'',10,0,3000);
+                    CREATE TABLE tblJoint (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        X REAL, Y REAL, HDiff REAL
+                    );
+                    INSERT INTO tblJoint VALUES
+                        (1,1,10,0,0,-1500), (2,2,10,6000,0,0);
+                    CREATE TABLE tblGrid (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        Jt1ID INTEGER, Jt2ID INTEGER
+                    );
+                    INSERT INTO tblGrid VALUES (11,1,10,1,2);
+                    CREATE TABLE tblColSect (
+                        ID INTEGER, No_ INTEGER, Mat INTEGER, Kind INTEGER,
+                        ShapeVal TEXT, b REAL, h REAL, u REAL, t REAL, d REAL, f REAL
+                    );
+                    INSERT INTO tblColSect VALUES (801,1,1,1,'1,400,400,6,801,',
+                        400,400,0,0,0,0);
+                    CREATE TABLE tblColSeg (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER, SectID INTEGER,
+                        JtID INTEGER, EccX REAL, EccY REAL, Rotation REAL
+                    );
+                    INSERT INTO tblColSeg VALUES (811,1,10,801,1,0,0,0);
+                    CREATE TABLE tblWallSect (
+                        ID INTEGER, No_ INTEGER, Mat INTEGER, Kind INTEGER,
+                        B REAL, H REAL, T2 REAL, Dis REAL, Dis1 REAL
+                    );
+                    INSERT INTO tblWallSect VALUES (802,1,1,1,300,0,0,0,0);
+                    CREATE TABLE tblWallSeg (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER, SectID INTEGER,
+                        GridID INTEGER, HDiff1 REAL, HDiff2 REAL
+                    );
+                    INSERT INTO tblWallSeg VALUES (812,1,10,802,11,0,0);
+                """)
+                connection.commit()
+            result = CONVERTER.convert_ydb(str(source), str(destination))
+            with closing(sqlite3.connect(str(destination))) as connection:
+                column_top = connection.execute(
+                    "SELECT CEndZ FROM tbl2"
+                ).fetchone()[0]
+                wall_tops = connection.execute(
+                    "SELECT WTopZ,WTopZ2 FROM tbl4"
+                ).fetchone()
+        self.assertEqual(1500.0, column_top)
+        self.assertEqual((1500.0, 3000.0), tuple(wall_tops))
+        self.assertEqual(1, result["column_tops_adjusted"])
+        self.assertTrue(any("柱顶" in w for w in result["warnings"]))
+
+    def test_arc_chord_chain_marks_bisarc(self):
+        # 弧梁弦线链：≥3 段相连且节点转角 0.03°~15° → BIsArc=1；
+        # 完全共线的连续梁（0°）不标记。
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "arc.ydb"
+            destination = Path(temp_dir) / "out.db"
+            with closing(sqlite3.connect(str(source))) as connection:
+                connection.executescript("""
+                    CREATE TABLE tblFloor (
+                        ID INTEGER, No_ INTEGER, Name TEXT, StdFlrID INTEGER,
+                        LevelB REAL, Height REAL
+                    );
+                    INSERT INTO tblFloor VALUES (1,1,'',10,0,3000);
+                    CREATE TABLE tblJoint (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        X REAL, Y REAL, HDiff REAL
+                    );
+                    INSERT INTO tblJoint VALUES
+                        (1,1,10,0,0,0), (2,2,10,6000,105,0), (3,3,10,11955,315,0),
+                        (4,4,10,17890,630,0),
+                        (5,5,10,0,5000,0), (6,6,10,6000,5000,0), (7,7,10,12000,5000,0);
+                    CREATE TABLE tblGrid (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        Jt1ID INTEGER, Jt2ID INTEGER
+                    );
+                    INSERT INTO tblGrid VALUES
+                        (11,1,10,1,2), (12,2,10,2,3), (13,3,10,3,4),
+                        (14,4,10,5,6), (15,5,10,6,7);
+                    CREATE TABLE tblBeamSect (
+                        ID INTEGER, No_ INTEGER, Mat INTEGER, Kind INTEGER,
+                        ShapeVal TEXT, b REAL, h REAL, u REAL, t REAL, d REAL, f REAL
+                    );
+                    INSERT INTO tblBeamSect VALUES (851,1,0,1,'1,200,400,6,851,',
+                        200,400,0,0,0,0);
+                    CREATE TABLE tblBeamSeg (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER, SectID INTEGER,
+                        GridID INTEGER, HDiff1 REAL, HDiff2 REAL
+                    );
+                    INSERT INTO tblBeamSeg VALUES
+                        (861,1,10,851,11,0,0), (862,2,10,851,12,0,0),
+                        (863,3,10,851,13,0,0),
+                        (864,4,10,851,14,0,0), (865,5,10,851,15,0,0);
+                """)
+                connection.commit()
+            result = CONVERTER.convert_ydb(str(source), str(destination))
+            with closing(sqlite3.connect(str(destination))) as connection:
+                marks = [
+                    row[0] for row in connection.execute(
+                        "SELECT BIsArc FROM tbl1 ORDER BY ID"
+                    )
+                ]
+        self.assertEqual([1, 1, 1, 0, 0], marks)
+        self.assertEqual(3, result["arc_beam_segments"])
+
+    def test_dimensionless_pec_section_fails_explicitly(self):
+        # A Kind-209 section with no dimensions anywhere must abort the
+        # conversion naming the section, never emit an unparseable @PEC string.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "dimless.ydb"
+            destination = Path(temp_dir) / "out.db"
+            with closing(sqlite3.connect(str(source))) as connection:
+                connection.executescript("""
+                    CREATE TABLE tblFloor (
+                        ID INTEGER, No_ INTEGER, Name TEXT, StdFlrID INTEGER,
+                        LevelB REAL, Height REAL
+                    );
+                    INSERT INTO tblFloor VALUES (1,1,'',10,0,3300);
+                    CREATE TABLE tblJoint (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        X REAL, Y REAL, HDiff REAL
+                    );
+                    INSERT INTO tblJoint VALUES (1,1,10,0,0,0), (2,2,10,0,6000,0);
+                    CREATE TABLE tblGrid (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        Jt1ID INTEGER, Jt2ID INTEGER
+                    );
+                    INSERT INTO tblGrid VALUES (11,1,10,1,2);
+                    CREATE TABLE tblBeamSect (
+                        ID INTEGER, No_ INTEGER, Mat INTEGER, Kind INTEGER,
+                        ShapeVal TEXT, b REAL, h REAL, u REAL, t REAL, d REAL, f REAL
+                    );
+                    INSERT INTO tblBeamSect VALUES (901,1,0,209,'209,901,',
+                        0,0,0,0,0,0);
+                    CREATE TABLE tblBeamSeg (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER, SectID INTEGER,
+                        GridID INTEGER, HDiff1 REAL, HDiff2 REAL
+                    );
+                    INSERT INTO tblBeamSeg VALUES (501,1,10,901,11,0,0);
+                    CREATE TABLE tblSubSectionSect (
+                        ID INTEGER, Kind INTEGER, No_ INTEGER, SubKind INTEGER,
+                        ShapeVal TEXT, b REAL, h REAL, u REAL, t REAL, d REAL, f REAL
+                    );
+                """)
+                connection.commit()
+            with self.assertRaises(ValueError) as caught:
+                CONVERTER.convert_ydb(str(source), str(destination))
+            message = str(caught.exception)
+            self.assertIn("901", message)
+            self.assertIn("PEC", message)
+            self.assertFalse(Path(destination).exists())
+
+    def test_packed_hot_rolled_subsection_decodes(self):
+        # 颛桥实测形态：209 主表尺寸全零，尺寸藏在子表 ShapeVal 的 Kind-26
+        # 打包串里（选择器 39 + 名称 HN400X200 + Q16 H/B），厚度取国标规格表。
+        packed = build_packed_hot_rolled_value(902, "HN400X200", 400, 200)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "packed.ydb"
+            destination = Path(temp_dir) / "out.db"
+            with closing(sqlite3.connect(str(source))) as connection:
+                connection.executescript("""
+                    CREATE TABLE tblFloor (
+                        ID INTEGER, No_ INTEGER, Name TEXT, StdFlrID INTEGER,
+                        LevelB REAL, Height REAL
+                    );
+                    INSERT INTO tblFloor VALUES (1,1,'',10,0,3300);
+                    CREATE TABLE tblJoint (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        X REAL, Y REAL, HDiff REAL
+                    );
+                    INSERT INTO tblJoint VALUES (1,1,10,0,0,0), (2,2,10,0,6000,0);
+                    CREATE TABLE tblGrid (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        Jt1ID INTEGER, Jt2ID INTEGER
+                    );
+                    INSERT INTO tblGrid VALUES (11,1,10,1,2);
+                    CREATE TABLE tblBeamSect (
+                        ID INTEGER, No_ INTEGER, Mat INTEGER, Kind INTEGER,
+                        ShapeVal TEXT, b REAL, h REAL, u REAL, t REAL, d REAL, f REAL
+                    );
+                    INSERT INTO tblBeamSect VALUES (902,1,0,209,'209,902,',
+                        0,0,0,0,0,0);
+                    CREATE TABLE tblBeamSeg (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER, SectID INTEGER,
+                        GridID INTEGER, HDiff1 REAL, HDiff2 REAL
+                    );
+                    INSERT INTO tblBeamSeg VALUES (502,1,10,902,11,0,0);
+                    CREATE TABLE tblSubSectionSect (
+                        ID INTEGER, Kind INTEGER, No_ INTEGER, SubKind INTEGER,
+                        ShapeVal TEXT, b REAL, h REAL, u REAL, t REAL, d REAL, f REAL
+                    );
+                """)
+                connection.execute(
+                    "INSERT INTO tblSubSectionSect VALUES (902,12,1,26,?,0,0,0,0,0,0)",
+                    (packed,),
+                )
+                connection.commit()
+            CONVERTER.convert_ydb(str(source), str(destination))
+            with closing(sqlite3.connect(str(destination))) as connection:
+                sections = [
+                    row[0] for row in connection.execute(
+                        "SELECT BSection FROM tbl1"
+                    )
+                ]
+        self.assertEqual(["H400X200X8X13@PEC"], sections)
+
+    def test_subsection_overrides_stale_main_values(self):
+        # 1117 类矛盾数据（handoff 2026-09-03）：主表 t/d/u/f 是陈旧值
+        # H350x150x6x11，子表 Kind-26 打包串为 HW200X200（YJK 界面所据）。
+        # 优先级规则：子表解码成功且校验通过 → 覆盖主表。
+        packed = build_packed_hot_rolled_value(903, "HW200X200", 200, 200)
+        result, sections = convert_single_209_beam(
+            (350.0, 150.0, 6.0, 11.0), ("packed", packed)
+        )
+        self.assertEqual(["H200X200X8X12@PEC"], sections)
+        self.assertEqual([], result["warnings"])
+
+    def test_packed_short_format_decodes(self):
+        # 短格式 11 字段子串（handoff §2.1）：[1..3]=选择器+名称 12 字节，
+        # [9]/[10]=b/h Q16；无 [14] 自定义标志与 [41] 尾部 ID 校验。
+        short = build_packed_short_value("HW200X200", 200, 200)
+        self.assertEqual(11, len(short.strip(",").split(",")))
+        result, sections = convert_single_209_beam(
+            (0.0, 0.0, 0.0, 0.0), ("packed", short)
+        )
+        self.assertEqual(["H200X200X8X12@PEC"], sections)
+        self.assertEqual([], result["warnings"])
+
+    def test_main_value_fallback_is_named_in_warnings(self):
+        # 无子表定义的 209 截面（如颛桥 12489 等 5 个）：仍取主表数值转换，
+        # 但必须在 result["warnings"] 中逐个点名，不静默。
+        result, sections = convert_single_209_beam((350.0, 150.0, 10.0, 16.0))
+        self.assertEqual(["H350X150X10X16@PEC"], sections)
+        self.assertEqual(1, len(result["warnings"]))
+        self.assertIn("SectID=903", result["warnings"][0])
+
+    def test_section_text_contract_matches_csharp_parser(self):
+        # 契约权威来源：CreateNewExtern/SectionTextParser.cs（只读参考仓库
+        # E:\revit-external-tool2.git）。此处锁定 Python 端与之一致的行为。
+        parse = CONVERTER.parse_h_section_text
+        self.assertEqual(
+            (400, 200, 8, 13, True),
+            parse("H400X200X8X13@PEC"),
+        )
+        self.assertEqual(                      # 小写 x 同样接受（C# 忽略大小写）
+            parse("H400x200x8x13@PEC"),
+            parse("H400X200X8X13@PEC"),
+        )
+        self.assertEqual(                      # × 与 * 分隔符
+            parse("H400×200×8×13@PEC"),
+            parse("H400*200*8*13@PEC"),
+        )
+        self.assertEqual(                      # 旧 C# 输出的末尾多余 X
+            parse("H400X200X8X13X@PEC"),
+            (400, 200, 8, 13, True),
+        )
+        self.assertEqual(
+            (400, 200, 8, 13, False),
+            parse("H400X200X8X13"),
+        )
+        self.assertIsNone(parse("209,33506@PEC"))
+        self.assertIsNone(parse("H400X200X0X13@PEC"))   # 尺寸必须为正
+        self.assertTrue(CONVERTER.has_pec_suffix("h400x200x8x13@pec"))
+        self.assertFalse(CONVERTER.has_pec_suffix("H400X200X8X13"))
+        self.assertEqual("209,33506", CONVERTER.remove_pec_suffix("209,33506@PEC"))
+        # 规范输出：大写 X、0.### 数字格式
+        self.assertEqual(
+            "H300X150X6.5X9@PEC",
+            CONVERTER.format_h_section(300, 150, 6.5, 9, pec=True),
+        )
+        self.assertEqual(
+            "H400X200X8X13",
+            CONVERTER.format_h_section(400.0, 200.0, 8.0, 13.0, pec=False),
+        )
+        # 同尺寸 PEC 与普通 H 名称不同（梁合并不得视为同一截面）
+        self.assertNotEqual(
+            CONVERTER.format_h_section(400, 200, 8, 13, pec=True),
+            CONVERTER.format_h_section(400, 200, 8, 13, pec=False),
+        )
 
 
 if __name__ == "__main__":
