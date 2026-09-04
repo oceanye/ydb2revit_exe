@@ -581,6 +581,89 @@ def _convert_ydb_in_place(source_path, destination_path):
             pec_main_wall_nodes.add((standard_floor_id, _value(grid, "Jt1ID")))
             pec_main_wall_nodes.add((standard_floor_id, _value(grid, "Jt2ID")))
 
+    def _detect_arc_beam_chains():
+        """几何识别弧梁弦线链，返回应标记 BIsArc=1 的梁段 ID 集合。
+
+        ydb 无弧元数据（无弧表、tblGrid.idCen 全哨兵、梁段无标志字段），
+        YJK 导出时把弧梁离散为弦线段；判定 = 同层首尾相连 ≥3 段、且链上
+        每个节点转角在 0.03°~15°（真折梁的构造转角通常更大，共线续接
+        则为 0°）。阈值以颛桥实测校准（17 链 / 60 段），依据
+        handoff-Python端-弧梁标记列BIsArc.md 的判定权授约定。
+        """
+        segments = {}
+        adjacency = {}
+        for segment in beam_segments:
+            grid = grid_for(_value(segment, "StdFlrID"), _value(segment, "GridID"))
+            if grid is None:
+                continue
+            node_a, node_b = _value(grid, "Jt1ID"), _value(grid, "Jt2ID")
+            key = _value(segment, "ID")
+            floor_id = _value(segment, "StdFlrID")
+            segments[key] = (floor_id, node_a, node_b)
+            for node in (node_a, node_b):
+                adjacency.setdefault((floor_id, node), []).append(key)
+
+        coordinates = {}
+        def node_xy(floor_id, node):
+            cache_key = (floor_id, node)
+            if cache_key not in coordinates:
+                joint = joint_for(floor_id, node)
+                coordinates[cache_key] = (
+                    None if joint is None
+                    else (_as_float(_value(joint, "X")), _as_float(_value(joint, "Y")))
+                )
+            return coordinates[cache_key]
+
+        def turn_degrees(a, m, b):
+            pa, pm, pb = node_xy(*a), node_xy(*m), node_xy(*b)
+            if pa is None or pm is None or pb is None:
+                return None
+            v1 = (pm[0] - pa[0], pm[1] - pa[1])
+            v2 = (pb[0] - pm[0], pb[1] - pm[1])
+            n1, n2 = math.hypot(*v1), math.hypot(*v2)
+            if n1 < 1.0 or n2 < 1.0:
+                return None
+            cosine = max(-1.0, min(1.0, (v1[0] * v2[0] + v1[1] * v2[1]) / (n1 * n2)))
+            return math.degrees(math.acos(cosine))
+
+        marked = set()
+        visited = set()
+        for segment_id, (floor_id, node_a, node_b) in segments.items():
+            if segment_id in visited:
+                continue
+            for start_node, next_node in ((node_a, node_b), (node_b, node_a)):
+                if segment_id in visited:
+                    break
+                chain = [segment_id]
+                visited.add(segment_id)
+                previous, current = start_node, next_node
+                while True:
+                    successor = None
+                    for candidate in adjacency.get((floor_id, current), []):
+                        if candidate in visited or candidate == chain[-1]:
+                            continue
+                        other_floor, ca, cb = segments[candidate]
+                        other_node = cb if ca == current else ca
+                        angle = turn_degrees(
+                            (floor_id, previous), (floor_id, current),
+                            (floor_id, other_node),
+                        )
+                        if angle is not None and 0.03 <= angle <= 15.0:
+                            successor = (candidate, other_node)
+                            break
+                    if successor is None:
+                        break
+                    candidate, other_node = successor
+                    visited.add(candidate)
+                    chain.append(candidate)
+                    previous, current = current, other_node
+                if len(chain) >= 3:
+                    marked.update(chain)
+                    break
+        return marked
+
+    arc_beam_segment_ids = _detect_arc_beam_chains()
+
     tbl1_rows = []
     # PEC sections whose four H dimensions cannot be resolved anywhere must
     # fail the conversion explicitly: emitting the raw ShapeVal with an @PEC
@@ -657,6 +740,7 @@ def _convert_ydb_in_place(source_path, destination_path):
                 _value(segment, "Ecc2", _value(segment, "Ecc", 0)),
                 _value(segment, "Rotation", 0),
                 start_z - beam_ref_z, end_z - beam_ref_z,
+                1 if _value(segment, "ID") in arc_beam_segment_ids else 0,
             ))
 
         for segment in brace_segments_by_floor.get(standard_floor_id, []):
@@ -676,10 +760,11 @@ def _convert_ydb_in_place(source_path, destination_path):
                 _value(joint2, "X"), _value(joint2, "Y"), brace_end_z,
                 _legacy_section_text(section), 0, len(tbl1_rows) + 1, None,
                 0, 0, 0, 0, 0,
-                brace_start_z - brace_ref_z, brace_end_z - brace_ref_z,
+                brace_start_z - brace_ref_z, brace_end_z - brace_ref_z, 0,
             ))
 
     tbl2_rows = []
+    adjusted_column_tops = []
     wall_h_column_ids_by_node = {}
     for floor_instance, floor in enumerate(floors):
         standard_floor_id = _value(floor, "StdFlrID")
@@ -722,9 +807,14 @@ def _convert_ydb_in_place(source_path, destination_path):
                 eccentric_x = _value(segment, "EccX", 0)
                 eccentric_y = _value(segment, "EccY", 0)
                 rotation = _value(segment, "Rotation", 0)
+            # 柱顶 = 层顶 + 该柱节点 HDiff（节点标高差；柱顶随梁平齐的
+            # 数据机制——梁 Z 公式本就含节点分量，柱与其同构）。
+            column_top_z = top_z + _as_float(_value(joint, "HDiff"))
+            if abs(column_top_z - top_z) > 1e-6:
+                adjusted_column_tops.append((_value(segment, "ID"), column_top_z))
             tbl2_rows.append((
                 _value(joint, "X"), _value(joint, "Y"), bottom_z,
-                _value(joint, "X"), _value(joint, "Y"), top_z,
+                _value(joint, "X"), _value(joint, "Y"), column_top_z,
                 section_text, 0, output_column_id, None,
                 eccentric_x, eccentric_y, rotation,
             ))
@@ -790,8 +880,12 @@ def _convert_ydb_in_place(source_path, destination_path):
                 "output_jt2_id": _value(grid, "Jt2ID"),
                 "start": [_value(joint1, "X"), _value(joint1, "Y"), bottom_z],
                 "end": [_value(joint2, "X"), _value(joint2, "Y"), bottom_z],
-                "top_start_z": floor_top_z + _as_float(_value(segment, "HDiff1")),
-                "top_end_z": floor_top_z + _as_float(_value(segment, "HDiff2")),
+                # 墙顶 = 层顶 + 墙段 HDiff + 端节点 HDiff（与梁 Z 公式同构；
+                # 实测两种来源互斥出现，叠加即完整，如弧形边缘墙仅节点带值）。
+                "top_start_z": floor_top_z + _as_float(_value(segment, "HDiff1"))
+                               + _as_float(_value(joint1, "HDiff")),
+                "top_end_z": floor_top_z + _as_float(_value(segment, "HDiff2"))
+                             + _as_float(_value(joint2, "HDiff")),
                 "wall_section": wall_section,
                 "bottom_floor": str(standard_floor_id),
                 "is_pec": kind in PEC_WALL_KINDS,
@@ -937,11 +1031,11 @@ def _convert_ydb_in_place(source_path, destination_path):
                     BEndX REAL, BEndY REAL, BEndZ REAL,
                     BSection TEXT, Tag INTEGER DEFAULT 0, ID INTEGER, RvtID TEXT,
                     BSConn REAL, BEConn REAL, Ecc REAL, Ecc2 REAL, BRotation REAL,
-                    BZOffset REAL, BZOffset2 REAL
+                    BZOffset REAL, BZOffset2 REAL, BIsArc INTEGER DEFAULT 0
                 )
             """)
             destination.executemany(
-                "INSERT INTO tbl1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", tbl1_rows
+                "INSERT INTO tbl1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", tbl1_rows
             )
 
             destination.execute("DROP TABLE IF EXISTS tbl2")
@@ -990,6 +1084,14 @@ def _convert_ydb_in_place(source_path, destination_path):
         source.close()
 
     warnings = []
+    if adjusted_column_tops:
+        samples = "、".join(
+            "SegID=%s->%.0f" % (seg_id, top_z) for seg_id, top_z in adjusted_column_tops[:3]
+        )
+        warnings.append(
+            "柱顶随节点标高下调 %d 根（示例 %s%s）" % (
+                len(adjusted_column_tops), samples,
+                " 等" if len(adjusted_column_tops) > 3 else ""))
     if main_value_fallback_sections:
         warnings = [
             "%s截面 SectID=%s 无子表定义，截面取主表数值（%d 根构件）" % (
@@ -1008,6 +1110,8 @@ def _convert_ydb_in_place(source_path, destination_path):
         "levels": len(tbl3_rows),
         "wall_legs": len(tbl4_rows),
         "pec_wall_groups": group_counter,
+        "arc_beam_segments": len(arc_beam_segment_ids),
+        "column_tops_adjusted": len(adjusted_column_tops),
         "warnings": warnings,
     }
 
