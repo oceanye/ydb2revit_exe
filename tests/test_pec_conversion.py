@@ -225,7 +225,7 @@ class PecConversionTests(unittest.TestCase):
             columns = [row[1] for row in connection.execute("PRAGMA table_info(tbl4)")]
         self.assertEqual(expected, columns[:12])
         self.assertEqual(
-            ["WGroupID", "WLegID", "WLegRole", "WShape", "WInfo"],
+            ["WGroupID", "WLegID", "WLegRole", "WShape", "WInfo", "WTopZ"],
             columns[12:],
         )
 
@@ -509,9 +509,11 @@ class PecConversionTests(unittest.TestCase):
             rows,
         )
 
-    def test_tbl3_includes_member_elevation_supplement(self):
-        # 方案A：降标高（层间）梁的端点 Z 不落在任何楼层底/顶上时，
-        # tbl3 必须补充该标高行（续 RFn 命名），插件才能为它创建 Level。
+    def test_dropped_beam_extracts_level_offsets(self):
+        # 偏移继承契约：降标高（层间）梁的端点 Z 不落在楼层底/顶上时，
+        # tbl3 不再补标高行（避免截断墙高），改在 tbl1 末尾输出
+        # BZOffset/BZOffset2（相对本层层顶的带符号偏移），插件端用
+        # "起点/终点标高偏移"参数继承建模。
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "drop.ydb"
             destination = Path(temp_dir) / "out.db"
@@ -542,22 +544,26 @@ class PecConversionTests(unittest.TestCase):
                         ID INTEGER, No_ INTEGER, StdFlrID INTEGER, SectID INTEGER,
                         GridID INTEGER, HDiff1 REAL, HDiff2 REAL
                     );
-                    -- 楼层顶 3000，梁降 1500 → 构件标高 1500
+                    -- 楼层顶 3000，梁降 1500 → 构件标高 1500，偏移 -1500
                     INSERT INTO tblBeamSeg VALUES (602,1,10,601,11,-1500,-1500);
                 """)
                 connection.commit()
             CONVERTER.convert_ydb(str(source), str(destination))
             with closing(sqlite3.connect(str(destination))) as connection:
-                rows = [
+                levels = [
                     (name, round(elevation, 6))
                     for name, elevation in connection.execute(
                         "SELECT Floor,LevelB FROM tbl3"
                     )
                 ]
-        self.assertEqual(
-            [("1F", 0.0), ("RF", 3000.0), ("RF2", 1500.0)],
-            rows,
-        )
+                beams = [
+                    (round(row[0], 6), round(row[1], 6))
+                    for row in connection.execute(
+                        "SELECT BZOffset,BZOffset2 FROM tbl1"
+                    )
+                ]
+        self.assertEqual([("1F", 0.0), ("RF", 3000.0)], levels)
+        self.assertEqual([(-1500.0, -1500.0)], beams)
 
     def test_dimensionless_pec_section_fails_explicitly(self):
         # A Kind-209 section with no dimensions anywhere must abort the

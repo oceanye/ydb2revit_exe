@@ -649,6 +649,7 @@ def _convert_ydb_in_place(source_path, destination_path):
                 _value(segment, "Ecc", 0),
                 _value(segment, "Ecc2", _value(segment, "Ecc", 0)),
                 _value(segment, "Rotation", 0),
+                start_z - top_z, end_z - top_z,
             ))
 
         for segment in brace_segments_by_floor.get(standard_floor_id, []):
@@ -657,13 +658,14 @@ def _convert_ydb_in_place(source_path, destination_path):
             if joint1 is None or joint2 is None:
                 continue
             section = brace_sections.get(_value(segment, "SectID"))
+            brace_start_z = top_z + _as_float(_value(joint1, "HDiff")) + _as_float(_value(segment, "HDiff1"))
+            brace_end_z = top_z + _as_float(_value(joint2, "HDiff")) + _as_float(_value(segment, "HDiff2"))
             tbl1_rows.append((
-                _value(joint1, "X"), _value(joint1, "Y"),
-                top_z + _as_float(_value(joint1, "HDiff")) + _as_float(_value(segment, "HDiff1")),
-                _value(joint2, "X"), _value(joint2, "Y"),
-                top_z + _as_float(_value(joint2, "HDiff")) + _as_float(_value(segment, "HDiff2")),
+                _value(joint1, "X"), _value(joint1, "Y"), brace_start_z,
+                _value(joint2, "X"), _value(joint2, "Y"), brace_end_z,
                 _legacy_section_text(section), 0, len(tbl1_rows) + 1, None,
                 0, 0, 0, 0, 0,
+                brace_start_z - top_z, brace_end_z - top_z,
             ))
 
     tbl2_rows = []
@@ -743,6 +745,7 @@ def _convert_ydb_in_place(source_path, destination_path):
     for floor_index, floor in enumerate(floors):
         standard_floor_id = _value(floor, "StdFlrID")
         bottom_z = _as_float(_value(floor, "LevelB"))
+        floor_top_z = bottom_z + _as_float(_value(floor, "Height"))
         for source_order, segment in enumerate(wall_segments_by_floor.get(standard_floor_id, [])):
             grid = grid_for(standard_floor_id, _value(segment, "GridID"))
             if grid is None:
@@ -776,6 +779,7 @@ def _convert_ydb_in_place(source_path, destination_path):
                 "output_jt2_id": _value(grid, "Jt2ID"),
                 "start": [_value(joint1, "X"), _value(joint1, "Y"), bottom_z],
                 "end": [_value(joint2, "X"), _value(joint2, "Y"), bottom_z],
+                "top_z": floor_top_z,
                 "wall_section": wall_section,
                 "bottom_floor": str(standard_floor_id),
                 "is_pec": kind in PEC_WALL_KINDS,
@@ -874,6 +878,7 @@ def _convert_ydb_in_place(source_path, destination_path):
             record["bottom_floor"], 0,
             record["group_id"], record["leg_id"], record["leg_role"],
             record["shape"], wall_info,
+            record["top_z"],
         ))
 
     # tbl3 is the full set of level elevations: every floor bottom plus every
@@ -910,20 +915,6 @@ def _convert_ydb_in_place(source_path, destination_path):
         if len(tbl3_rows) > previous:
             intermediate_index += 1
 
-    # 构件实际标高补集（方案A，2026-09-03）：降标高/层间梁等构件端点 Z 若
-    # 不落在任何楼层底/顶上，补充标高行（续 RFn 命名）。插件的建模模型是
-    # "tbl3 每行 → 创建一个 Level → 构件按 Z 找同标高 Level 挂接"，缺了
-    # 这行，该构件就会因找不到标高而被跳过（如颛桥 Z=400 的 329 根梁）。
-    for rows in (tbl1_rows, tbl2_rows, tbl4_rows):
-        for row in rows:
-            for elevation in (row[2], row[5]):
-                if elevation is None:
-                    continue
-                previous = len(tbl3_rows)
-                _add_level("RF" + str(intermediate_index + 1), elevation)
-                if len(tbl3_rows) > previous:
-                    intermediate_index += 1
-
     destination = sqlite3.connect(str(destination_path))
     try:
         with destination:
@@ -933,11 +924,12 @@ def _convert_ydb_in_place(source_path, destination_path):
                     BStartX REAL, BStartY REAL, BStartZ REAL,
                     BEndX REAL, BEndY REAL, BEndZ REAL,
                     BSection TEXT, Tag INTEGER DEFAULT 0, ID INTEGER, RvtID TEXT,
-                    BSConn REAL, BEConn REAL, Ecc REAL, Ecc2 REAL, BRotation REAL
+                    BSConn REAL, BEConn REAL, Ecc REAL, Ecc2 REAL, BRotation REAL,
+                    BZOffset REAL, BZOffset2 REAL
                 )
             """)
             destination.executemany(
-                "INSERT INTO tbl1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", tbl1_rows
+                "INSERT INTO tbl1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", tbl1_rows
             )
 
             destination.execute("DROP TABLE IF EXISTS tbl2")
@@ -967,11 +959,12 @@ def _convert_ydb_in_place(source_path, destination_path):
                     WEndX REAL, WEndY REAL, WEndZ REAL,
                     WSection TEXT, Tag INTEGER DEFAULT 0, ID INTEGER, RvtID TEXT,
                     BottomFloor TEXT, WEConn REAL,
-                    WGroupID TEXT, WLegID TEXT, WLegRole TEXT, WShape TEXT, WInfo TEXT
+                    WGroupID TEXT, WLegID TEXT, WLegRole TEXT, WShape TEXT, WInfo TEXT,
+                    WTopZ REAL
                 )
             """)
             destination.executemany(
-                "INSERT INTO tbl4 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", tbl4_rows
+                "INSERT INTO tbl4 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", tbl4_rows
             )
             destination.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tbl4_group ON tbl4(WGroupID)"
