@@ -225,7 +225,7 @@ class PecConversionTests(unittest.TestCase):
             columns = [row[1] for row in connection.execute("PRAGMA table_info(tbl4)")]
         self.assertEqual(expected, columns[:12])
         self.assertEqual(
-            ["WGroupID", "WLegID", "WLegRole", "WShape", "WInfo", "WTopZ"],
+            ["WGroupID", "WLegID", "WLegRole", "WShape", "WInfo", "WTopZ", "WTopZ2"],
             columns[12:],
         )
 
@@ -564,6 +564,55 @@ class PecConversionTests(unittest.TestCase):
                 ]
         self.assertEqual([("1F", 0.0), ("RF", 3000.0)], levels)
         self.assertEqual([(-1500.0, -1500.0)], beams)
+
+    def test_wall_top_offsets_extracted(self):
+        # 墙顶标高调整：tblWallSeg.HDiff1/HDiff2 为墙两端顶标高差。
+        # 平顶墙（两端同值）→ WTopZ=WTopZ2；斜顶墙（两端不同）→ 两列不同。
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "walltop.ydb"
+            destination = Path(temp_dir) / "out.db"
+            with closing(sqlite3.connect(str(source))) as connection:
+                connection.executescript("""
+                    CREATE TABLE tblFloor (
+                        ID INTEGER, No_ INTEGER, Name TEXT, StdFlrID INTEGER,
+                        LevelB REAL, Height REAL
+                    );
+                    INSERT INTO tblFloor VALUES (1,1,'',10,0,3000);
+                    CREATE TABLE tblJoint (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        X REAL, Y REAL, HDiff REAL
+                    );
+                    INSERT INTO tblJoint VALUES
+                        (1,1,10,0,0,0), (2,2,10,6000,0,0), (3,3,10,12000,0,0);
+                    CREATE TABLE tblGrid (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER,
+                        Jt1ID INTEGER, Jt2ID INTEGER
+                    );
+                    INSERT INTO tblGrid VALUES (11,1,10,1,2), (12,2,10,2,3);
+                    CREATE TABLE tblWallSect (
+                        ID INTEGER, No_ INTEGER, Mat INTEGER, Kind INTEGER,
+                        B REAL, H REAL, T2 REAL, Dis REAL, Dis1 REAL
+                    );
+                    INSERT INTO tblWallSect VALUES (701,1,1,1,300,0,0,0,0);
+                    CREATE TABLE tblWallSeg (
+                        ID INTEGER, No_ INTEGER, StdFlrID INTEGER, SectID INTEGER,
+                        GridID INTEGER, HDiff1 REAL, HDiff2 REAL
+                    );
+                    -- 平顶降墙：顶 3000-1500=1500
+                    INSERT INTO tblWallSeg VALUES (711,1,10,701,11,-1500,-1500);
+                    -- 斜顶墙：起端顶 1500、终端顶 3000
+                    INSERT INTO tblWallSeg VALUES (712,2,10,701,12,-1500,0);
+                """)
+                connection.commit()
+            CONVERTER.convert_ydb(str(source), str(destination))
+            with closing(sqlite3.connect(str(destination))) as connection:
+                tops = [
+                    (round(row[0], 6), round(row[1], 6))
+                    for row in connection.execute(
+                        "SELECT WTopZ,WTopZ2 FROM tbl4 ORDER BY ID"
+                    )
+                ]
+        self.assertEqual([(1500.0, 1500.0), (1500.0, 3000.0)], tops)
 
     def test_dimensionless_pec_section_fails_explicitly(self):
         # A Kind-209 section with no dimensions anywhere must abort the

@@ -1,6 +1,6 @@
 # 需求：CreateNewExtern 插件 · 标高偏移继承建模（BZOffset / WTopZ）
 
-版本：v2（2026-09-04，取代 v1"墙高显式化WTopZ"方案）
+版本：v3（2026-09-04，增补墙顶两端 HDiff：WTopZ/WTopZ2，支持斜顶墙）
 提出方：Python 转换器侧（E:\ydb2revit_exe）
 接收方：CreateNewExtern 插件维护（源码 `E:\revit-external-tool2.git`，
 部署 `C:\ProgramData\Autodesk\Revit\Addins\2018\CreateNewExtern.dll`）
@@ -16,7 +16,7 @@ Python 侧**已落地**的数据契约（tbl3 已回到"楼层底∪楼层顶"�
 | 表 | 末尾追加列 | 语义 |
 |---|---|---|
 | `tbl1` | `BZOffset REAL`、`BZOffset2 REAL`（mm，带符号） | 梁**起点/终点**相对**本层层顶标高**的偏移；普通梁 = 0；降标高（层间）梁如颛桥 2F 为 −1500（169 根） |
-| `tbl4` | `WTopZ REAL`（mm，绝对标高） | 该墙**真实顶标高**；本期 = 层顶；预留将来每面墙不同顶（斜屋面下外圈墙参差等） |
+| `tbl4` | `WTopZ REAL`、`WTopZ2 REAL`（mm，绝对标高） | 墙**起端/终端真实顶标高** = 层顶 + tblWallSeg.HDiff1/HDiff2。平顶墙两列相等；斜顶墙两列不同（如颛桥 2F 一段 400→1900）。颛桥 2F 实测：9 段 400/400、1 段 400/1900、60 段 1900/1900 |
 
 ## 2. 插件端修改点
 
@@ -46,8 +46,12 @@ Level refLevel = FindLevelAtElevation(orderedLevels, refStartZ);
 改为（`WTopZ` 列存在且 > WStartZ 时）：
 
 ```csharp
-double wallHeight = (WTopZ - WStartZ) / 304.8;   // 显式墙顶，与标高排序无关
-// 无 WTopZ 列（旧库）→ 回退"上一条标高"逻辑。
+if (WTopZ 与 WTopZ2 相等)
+    wallHeight = (WTopZ - WStartZ) / 304.8;      // 平顶：显式高度
+else
+    // 斜顶墙：建议取两端较高者为墙高 + 编辑墙轮廓成斜线；
+    // 或按项目约定取较低者并记录差异。两端值均已提供。
+// 无 WTopZ/WTopZ2 列（旧库）→ 回退"上一条标高"逻辑。
 ```
 
 墙定位线仍两端取 `WStartZ`（底平面），`WTopZ` 只用于高度。

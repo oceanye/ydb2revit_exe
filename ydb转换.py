@@ -779,7 +779,8 @@ def _convert_ydb_in_place(source_path, destination_path):
                 "output_jt2_id": _value(grid, "Jt2ID"),
                 "start": [_value(joint1, "X"), _value(joint1, "Y"), bottom_z],
                 "end": [_value(joint2, "X"), _value(joint2, "Y"), bottom_z],
-                "top_z": floor_top_z,
+                "top_start_z": floor_top_z + _as_float(_value(segment, "HDiff1")),
+                "top_end_z": floor_top_z + _as_float(_value(segment, "HDiff2")),
                 "wall_section": wall_section,
                 "bottom_floor": str(standard_floor_id),
                 "is_pec": kind in PEC_WALL_KINDS,
@@ -878,7 +879,7 @@ def _convert_ydb_in_place(source_path, destination_path):
             record["bottom_floor"], 0,
             record["group_id"], record["leg_id"], record["leg_role"],
             record["shape"], wall_info,
-            record["top_z"],
+            record["top_start_z"], record["top_end_z"],
         ))
 
     # tbl3 is the full set of level elevations: every floor bottom plus every
@@ -960,11 +961,11 @@ def _convert_ydb_in_place(source_path, destination_path):
                     WSection TEXT, Tag INTEGER DEFAULT 0, ID INTEGER, RvtID TEXT,
                     BottomFloor TEXT, WEConn REAL,
                     WGroupID TEXT, WLegID TEXT, WLegRole TEXT, WShape TEXT, WInfo TEXT,
-                    WTopZ REAL
+                    WTopZ REAL, WTopZ2 REAL
                 )
             """)
             destination.executemany(
-                "INSERT INTO tbl4 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", tbl4_rows
+                "INSERT INTO tbl4 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", tbl4_rows
             )
             destination.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tbl4_group ON tbl4(WGroupID)"
