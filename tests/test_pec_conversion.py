@@ -1,5 +1,6 @@
 # coding: utf-8
 import importlib.util
+import hashlib
 import json
 import sqlite3
 import struct
@@ -410,6 +411,40 @@ class PecConversionTests(unittest.TestCase):
         self.assertEqual("H400X200X8X16@PEC", sections[4])
         self.assertEqual((7.0, 8.0, 9.0), rows[4][1:])
 
+    def test_upper_contract_metadata_is_written_without_touching_foundation_keys(self):
+        source_hash = hashlib.sha256(self.pec_source.read_bytes()).hexdigest().upper()
+        with closing(sqlite3.connect(self.pec_output)) as connection:
+            metadata = dict(connection.execute(
+                "SELECT Key,Value FROM handoff_meta ORDER BY Key"
+            ))
+        self.assertEqual("UPPER_HANDOFF_V1", metadata["Upper.ContractVersion"])
+        self.assertEqual("1", metadata["Upper.SchemaVersion"])
+        self.assertEqual("1", metadata["Upper.ColumnPlacementVersion"])
+        self.assertEqual("degree", metadata["Upper.AngleUnit"])
+        self.assertEqual("mm", metadata["Upper.CoordinateUnit"])
+        self.assertEqual("DERIVE_FROM_TBL4_WINFO", metadata["Upper.ColumnWallEndRule"])
+        self.assertEqual(source_hash, metadata["Upper.SourceSHA256"])
+
+    def test_reversed_l_wall_keeps_top_elevation_with_each_endpoint(self):
+        source = Path(self.temp_dir.name) / "reversed_l_top.ydb"
+        output = Path(self.temp_dir.name) / "reversed_l_top.db"
+        with closing(sqlite3.connect(self.pec_source)) as original, closing(
+            sqlite3.connect(source)
+        ) as connection:
+            original.backup(connection)
+            connection.execute(
+                "UPDATE tblWallSeg SET HDiff1=-100,HDiff2=-200 WHERE ID=111"
+            )
+            connection.commit()
+        CONVERTER.convert_ydb(source, output)
+        with closing(sqlite3.connect(output)) as connection:
+            row = connection.execute(
+                "SELECT WStartX,WStartY,WEndX,WEndY,WTopZ,WTopZ2 "
+                "FROM tbl4 WHERE WShape='L' AND WLegRole='MAIN'"
+            ).fetchone()
+        self.assertEqual((0.0, 1000.0, 0.0, 0.0), tuple(row[:4]))
+        self.assertEqual((3100.0, 3200.0), tuple(row[4:]))
+
     def test_kind2_column_at_secondary_outer_end_is_not_a_main_end_column(self):
         source = Path(self.temp_dir.name) / "secondary_outer_column.ydb"
         output = Path(self.temp_dir.name) / "secondary_outer_column.db"
@@ -721,8 +756,8 @@ class PecConversionTests(unittest.TestCase):
         self.assertTrue(any("柱顶" in w for w in result["warnings"]))
 
     def test_arc_chord_chain_marks_bisarc(self):
-        # 弧梁弦线链：≥3 段相连且节点转角 0.03°~15° → BIsArc=1；
-        # 完全共线的连续梁（0°）不标记。
+        # 现有弧梁启发式：≥3 段、0.1°~40°、单调转向且累计≥1.5°；
+        # 完全共线的连续梁（0°）不标记。此标记仅供 Revit 亮显复核。
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "arc.ydb"
             destination = Path(temp_dir) / "out.db"
@@ -904,6 +939,44 @@ class PecConversionTests(unittest.TestCase):
         self.assertEqual(["H350X150X10X16@PEC"], sections)
         self.assertEqual(1, len(result["warnings"]))
         self.assertIn("SectID=903", result["warnings"][0])
+
+    def test_independent_warnings_are_accumulated(self):
+        source = Path(self.temp_dir.name) / "combined_warnings.ydb"
+        output = Path(self.temp_dir.name) / "combined_warnings.db"
+        with closing(sqlite3.connect(self.pec_source)) as original, closing(
+            sqlite3.connect(source)
+        ) as connection:
+            original.backup(connection)
+            connection.execute(
+                "INSERT INTO tblJoint VALUES (6,6,10,3000,3000,-100)"
+            )
+            connection.execute(
+                "INSERT INTO tblColSect VALUES "
+                "(302,2,0,209,'209,302,',0,0,8,400,200,16)"
+            )
+            connection.execute(
+                "INSERT INTO tblColSeg VALUES (315,5,10,302,6,150,-175,90)"
+            )
+            connection.commit()
+        result = CONVERTER.convert_ydb(source, output)
+        self.assertEqual(2, len(result["warnings"]))
+        self.assertTrue(any("柱顶" in warning for warning in result["warnings"]))
+        self.assertTrue(any("SectID=302" in warning for warning in result["warnings"]))
+        with closing(sqlite3.connect(output)) as connection:
+            placement = connection.execute(
+                "SELECT EccX,EccY,Rotation FROM tbl2 ORDER BY ID DESC LIMIT 1"
+            ).fetchone()
+        self.assertEqual((150.0, -175.0, 90.0), tuple(placement))
+
+    def test_four_part_kind26_name_supplies_thicknesses(self):
+        packed = build_packed_hot_rolled_value(
+            903, "H400X200X8X13", 400, 200
+        )
+        result, sections = convert_single_209_beam(
+            (0.0, 0.0, 0.0, 0.0), ("packed", packed)
+        )
+        self.assertEqual(["H400X200X8X13@PEC"], sections)
+        self.assertEqual([], result["warnings"])
 
     def test_section_text_contract_matches_csharp_parser(self):
         # 契约权威来源：CreateNewExtern/SectionTextParser.cs（只读参考仓库

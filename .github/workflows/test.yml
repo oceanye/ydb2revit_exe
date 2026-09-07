@@ -1,0 +1,25 @@
+name: test-and-build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install development dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Run regression tests
+        run: python -m pytest -q
+      - name: Compile Python sources
+        shell: pwsh
+        run: python -m py_compile ydb转换.py handoff_atomic.py foundation_handoff.py foundation_web.py
+      - name: Build converter executable
+        run: python -m PyInstaller --clean --noconfirm ydb转换.spec

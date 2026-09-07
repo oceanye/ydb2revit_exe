@@ -1,4 +1,9 @@
-# YJK ydb 杆件坐标系与梁柱偏心定义（梳理稿）
+# YJK ydb 杆件坐标系与梁柱偏心定义（历史梳理稿）
+
+> 2026-09-07 状态说明：柱与当前接口的权威约定已更新为
+> `handoff-Revit端-柱偏心旋转与近期接口联动-20260907.md`。本文保留早期
+> 调研过程；其中“柱端把 degree 当 radian”和“tbl1 没有梁偏心列”均已解决，
+> 不得再作为当前实现结论。
 
 > 用途：为"ydb → ydb转换数据库.db → Revit"管线中梁柱偏心的读取与生成提供定义基准。
 > 来源：① 同济大学学报《基于工业基础类标准的参数化实体模型数据交互技术》(张其林等, 2021)；
@@ -65,24 +70,28 @@
 ### 5.1 实测表结构（`ydb转换数据库.db`）
 ```
 tbl2(柱): CStartX..CEndZ, CSection, Tag, ID, RvtID, EccX(10), EccY(11), Rotation(12)
-tbl1(梁): BStartX..BEndZ, BSection, Tag, ID, RvtID, BSConn(10), BEConn(11)   ← 无偏心列
+tbl1(梁): BStartX..BEndZ, BSection, Tag, ID, RvtID, BSConn(10), BEConn(11),
+           Ecc(12), Ecc2(13), BRotation(14), BZOffset(15), BZOffset2(16), BIsArc(17)
 CombineBeam: id, StartX..EndZ, ShapeValue, Info(GKL/GL)                       ← 无偏心列
 ```
 样例柱：`EccX=0, EccY=200, Rotation=0`。
 
-**根因（实测 `ydb转换.py` + 真实 .ydb）**：原始 `.ydb` 的 `tblBeamSeg` **本就含 `Ecc`（梁偏心）**，但转换器只 SELECT 了 `GridID,SectID,StdFlrID,ID,HDiff1,HDiff2`，丢弃了 `Ecc/Ecc2/Rotation`，导致 tbl1 没有偏心列。
+**历史根因与落实结果**：原始 `.ydb` 的 `tblBeamSeg` 本就含 `Ecc/Ecc2/Rotation`；
+旧转换器曾丢弃这些值，当前转换器已经把三列追加到 `tbl1` 并原样传递。
 - `tblBeamSeg` 实测列：`ID,No_,StdFlrID,SectID,GridID, Ecc, HDiff1,HDiff2, Rotation, JYDef, …, Ecc2`
-- `tblColSeg` 实测列：`ID,No_,StdFlrID,SectID,JtID, EccX,EccY,Rotation, HDiffB, …`（柱的 `Ecc*/Rotation` 已被 `ydb转换.py:162` 正确 SELECT）
+- `tblColSeg` 实测列：`ID,No_,StdFlrID,SectID,JtID, EccX,EccY,Rotation, HDiffB, …`（柱的三个定位值由当前转换器原样传到 `tbl2`）
 - 实测 `tblBeamSeg.Ecc`：`{0, +25, −23}` mm，带符号；`Ecc2` 与 `Ecc` 等值（疑为起/终点两端值）；梁 `Rotation=0`。
 - 实测 `tblColSeg.Rotation = 90.0`（**度**）。
 
 ### 5.2 柱变换公式（`SqliteDataToRevit.cs:206-219`，含反射）
 ```
 ΔX = EccX·cosθ + EccY·sinθ
-ΔY = EccX·sinθ − EccY·cosθ        // θ=Rotation
+ΔY = EccX·sinθ − EccY·cosθ        // θ=Rotation×π/180
 ```
 代入样例(θ=0,EccY=200) → ΔX=0, ΔY=−200（正 EccY 在 θ=0 时偏 −Y）。
-> ⚠️ 已证实的 bug：`tblColSeg.Rotation` 是**度**（实测 90.0）。此式 `Math.Cos(θ)` 却按**弧度**用，而 `:277` 旋转又 `(π·θ)/180` 按度——带转角的偏心柱会算错位（EccX=0,θ=90 时应 `ΔX=EccY`，实得 `ΔY=EccY·cos(90rad)≠0`）。梁改造时一并评估是否修此处。
+> 2026-09-07 复核：实际清单加载的 DLL 已先把 `Rotation` 从 degree 转为
+> radian，再同时用于三角函数和 Revit 旋转；组合偏心+旋转路径正确。新数据端
+> 同时写入 `Upper.AngleUnit=degree` 与 `Upper.ColumnPlacementVersion=1`。
 
 ### 5.3 梁的目标公式（反推，待 Python 与测试模型定符号）
 设梁水平单位轴向 `t=(tx,ty)`，水平垂直方向 `n = U1×U2 = (ty, −tx)`：
@@ -128,9 +137,9 @@ CombineBeam: id, StartX..EndZ, ShapeValue, Info(GKL/GL)                       �
 4. **梁端连接(join)**：偏心后梁端与柱/梁的自动连接可能改变端部裁剪；必要时 `DisallowJoinAtEnd`。
 5. **斜梁标高偏移**：按当前要求暂不处理斜向 → 生成时不设 `起点/终点标高偏移`（移除 `SqliteDataToRevit.cs:390-396`），梁按参照标高水平生成。
 
-## 7. 待 Python 源码确认的开放项
+## 7. 历史开放项的当前状态
 
-1. 转换器是否往 `tbl1` 写梁偏心？字段名（建议 `Ecc`，单值）/ 单位(mm) / 是否区分起终点。
+1. 已写 `Ecc/Ecc2/BRotation`，分别保留起端、终端值和 degree 旋转。
 2. 偏心符号约定（正值偏哪侧）。
 3. `CombineBeam` 合并多段共线梁时，各段偏心若不同取谁（通常应一致）。
 4. 是否同时去掉斜梁的"起点/终点标高偏移"处理（`SqliteDataToRevit.cs:390-396`）。

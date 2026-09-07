@@ -9,10 +9,12 @@
 //      由 CombineBeam::Execute 末尾经 IL 挂接调用，实现"合并梁并生成模型"一键全生成。
 //
 // 稳定性设计：tbl4.RvtID 锚定已建墙；比例尺 = 墙曲线长 / 数据库节点长，对坐标系免疫；
-// 重复运行先删除既有板（按名称匹配），幂等；GenerateAllPlates 全程吞错，不影响宿主命令。
+// 重复运行只删除本命令以 ApplicationId/ApplicationDataId 标记的板，幂等且不误删用户模型；
+// GenerateAllPlates 全程吞错，不影响宿主命令。
 using System;
 using System.Collections.Generic;
 using System.Data.SQLite;
+using System.Globalization;
 using System.IO;
 using System.Text.RegularExpressions;
 using Autodesk.Revit.Attributes;
@@ -27,6 +29,9 @@ namespace CreateNewExtern
         private const string DbPath =
             @"C:\ProgramData\Autodesk\Revit\Addins\2018\数据库\ydb转换数据库.db";
         private const double FeetPerMm = 1.0 / 304.8;
+        private const string DirectShapeApplicationId =
+            "CreateNewExtern.PecStiffenerCommand";
+        private const string DirectShapeDataPrefix = "PECPlate:";
 
         private static readonly Regex StiffenerRegex = new Regex(
             "\"internal_stiffener\":\\{\"count\":(\\d+)," +
@@ -35,6 +40,12 @@ namespace CreateNewExtern
             "\"web_thickness_mm\":([0-9.eE+-]+)");
         private static readonly Regex RefsRegex = new Regex(
             "\"tbl2_column_refs\":\\{\"end\":(\\d+),\"start\":(\\d+)\\}");
+        private static readonly Regex HSectionRegex = new Regex(
+            @"^\s*H\s*([0-9]+(?:\.[0-9]+)?)\s*[xX×*]\s*" +
+            @"([0-9]+(?:\.[0-9]+)?)\s*[xX×*]\s*" +
+            @"([0-9]+(?:\.[0-9]+)?)\s*[xX×*]\s*" +
+            @"([0-9]+(?:\.[0-9]+)?)(?:\s*[xX])?\s*(?:@PEC)?\s*$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
         private class WallRow
         {
@@ -121,14 +132,25 @@ namespace CreateNewExtern
                     secondaryWidth[row.Group] = row.Section;
             }
 
-            // Revit 2018 无 IsTransacting：尝试自开事务，失败说明宿主（CombineBeam）
-            // 事务仍打开，此时直接并入宿主事务创建图元。
-            Transaction transaction = new Transaction(doc, "生成PEC钢板");
-            bool ownTransaction = false;
-            try { transaction.Start(); ownTransaction = true; }
-            catch (Exception) { transaction.Dispose(); transaction = null; }
+            // 独立命令使用 Transaction；被 CombineBeam 的开放事务调用时使用
+            // SubTransaction。事务启动失败属于真实错误，不能当成“已有宿主事务”。
+            Transaction transaction = null;
+            SubTransaction subTransaction = null;
             try
             {
+                if (doc.IsModifiable)
+                {
+                    subTransaction = new SubTransaction(doc);
+                    if (subTransaction.Start() != TransactionStatus.Started)
+                        throw new InvalidOperationException("无法启动 PEC 钢板子事务");
+                }
+                else
+                {
+                    transaction = new Transaction(doc, "生成PEC钢板");
+                    if (transaction.Start() != TransactionStatus.Started)
+                        throw new InvalidOperationException("无法启动 PEC 钢板事务");
+                }
+
                 DeleteExistingPlates(doc);
 
                 foreach (WallRow row in walls)
@@ -211,10 +233,8 @@ namespace CreateNewExtern
                             row.WebThk * scale, z0, z1, problems, row.Leg + " 腹板");
                         if (webPlate != null)
                         {
-                            DirectShape webShape = DirectShape.CreateElement(
-                                doc, new ElementId(BuiltInCategory.OST_GenericModel));
-                            webShape.SetShape(new List<GeometryObject> { webPlate });
-                            webShape.Name = row.Leg + " 腹板";
+                            CreateOwnedDirectShape(
+                                doc, webPlate, row.Leg + ":WEB", row.Leg + " 腹板");
                             created++;
                             webs++;
                         }
@@ -237,23 +257,63 @@ namespace CreateNewExtern
                                 z0, z1, problems, row.Leg + " 加劲板" + index);
                             if (plate == null) continue;
 
-                            DirectShape shape = DirectShape.CreateElement(
-                                doc, new ElementId(BuiltInCategory.OST_GenericModel));
-                            shape.SetShape(new List<GeometryObject> { plate });
-                            shape.Name = row.Leg + " 加劲板" + index;
+                            CreateOwnedDirectShape(
+                                doc, plate, row.Leg + ":STIFFENER:" + index,
+                                row.Leg + " 加劲板" + index);
                             created++;
                         }
                     }
                 }
+
+                TransactionStatus status = subTransaction != null
+                    ? subTransaction.Commit()
+                    : transaction.Commit();
+                if (status != TransactionStatus.Committed)
+                    throw new InvalidOperationException("PEC 钢板事务提交失败：" + status);
+            }
+            catch
+            {
+                TryRollback(subTransaction, transaction);
+                throw;
             }
             finally
             {
-                if (ownTransaction && transaction != null)
-                {
-                    try { transaction.Commit(); }
-                    catch (Exception ex) { problems.Add("事务提交失败：" + ex.Message); }
-                }
+                if (subTransaction != null) subTransaction.Dispose();
+                if (transaction != null) transaction.Dispose();
             }
+        }
+
+        private static void TryRollback(SubTransaction subTransaction,
+                                        Transaction transaction)
+        {
+            try
+            {
+                if (subTransaction != null
+                    && subTransaction.GetStatus() == TransactionStatus.Started)
+                    subTransaction.RollBack();
+            }
+            catch (Exception) { }
+            try
+            {
+                if (transaction != null
+                    && transaction.GetStatus() == TransactionStatus.Started)
+                    transaction.RollBack();
+            }
+            catch (Exception) { }
+        }
+
+        private static DirectShape CreateOwnedDirectShape(Document doc,
+                                                           GeometryObject geometry,
+                                                           string dataId,
+                                                           string name)
+        {
+            DirectShape shape = DirectShape.CreateElement(
+                doc, new ElementId(BuiltInCategory.OST_GenericModel));
+            shape.ApplicationId = DirectShapeApplicationId;
+            shape.ApplicationDataId = DirectShapeDataPrefix + dataId;
+            shape.SetShape(new List<GeometryObject> { geometry });
+            shape.Name = name;
+            return shape;
         }
 
         // ------------------------------------------- 删除旧板（幂等，可重复运行）
@@ -264,8 +324,13 @@ namespace CreateNewExtern
             List<ElementId> doomed = new List<ElementId>();
             foreach (Element element in collector)
             {
-                string name = element.Name == null ? "" : element.Name;
-                if (name.IndexOf("加劲板") >= 0 || name.EndsWith("腹板"))
+                DirectShape shape = element as DirectShape;
+                if (shape != null
+                    && String.Equals(shape.ApplicationId, DirectShapeApplicationId,
+                                     StringComparison.Ordinal)
+                    && !String.IsNullOrEmpty(shape.ApplicationDataId)
+                    && shape.ApplicationDataId.StartsWith(
+                        DirectShapeDataPrefix, StringComparison.Ordinal))
                     doomed.Add(element.Id);
             }
             if (doomed.Count > 0) doc.Delete(doomed);
@@ -275,10 +340,17 @@ namespace CreateNewExtern
         {
             XYZ dataStart = new XYZ(row.StartX * FeetPerMm, row.StartY * FeetPerMm, 0);
             XYZ dataEnd = new XYZ(row.EndX * FeetPerMm, row.EndY * FeetPerMm, 0);
-            double toStart = p0.DistanceTo(dataStart);
-            double toEnd = p0.DistanceTo(dataEnd);
+            double toStart = HorizontalDistance(p0, dataStart);
+            double toEnd = HorizontalDistance(p0, dataEnd);
             if (toStart > 1.0 && toEnd > 1.0) return false;  // 坐标系被变换：按对称假设
             return toStart > toEnd;
+        }
+
+        private static double HorizontalDistance(XYZ first, XYZ second)
+        {
+            double dx = first.X - second.X;
+            double dy = first.Y - second.Y;
+            return Math.Sqrt(dx * dx + dy * dy);
         }
 
         private static XYZ At(XYZ center, XYZ normal, double alongNormal, double z)
@@ -395,12 +467,11 @@ namespace CreateNewExtern
                         {
                             long id = reader.GetInt64(0);
                             string section = reader.IsDBNull(1) ? "" : reader.GetString(1);
-                            // "H600x300x7x22@PEC" -> 高度 600
-                            if (!section.StartsWith("H", StringComparison.OrdinalIgnoreCase))
-                                continue;
-                            string[] parts = section.Substring(1).Split('x', '@');
-                            double height;
-                            if (parts.Length >= 4 && double.TryParse(parts[0], out height))
+                            // 接受转换器规范大写 X，同时兼容 x、×、* 与旧尾随 X。
+                            Match match = HSectionRegex.Match(section);
+                            double height = match.Success
+                                ? ParseText(match.Groups[1].Value) : 0.0;
+                            if (height > 0)
                                 result[id] = height;
                         }
                     }
@@ -421,7 +492,12 @@ namespace CreateNewExtern
         private static double ParseText(string text)
         {
             double value;
-            return double.TryParse(text, out value) ? value : 0.0;
+            if (double.TryParse(text, NumberStyles.Float,
+                                CultureInfo.InvariantCulture, out value))
+                return value;
+            return double.TryParse(text, NumberStyles.Float,
+                                   CultureInfo.CurrentCulture, out value)
+                ? value : 0.0;
         }
 
         private static void StringBuilderReport(int considered, int created,

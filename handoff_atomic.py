@@ -19,6 +19,10 @@ TARGET_TABLES = {
     UPPER_MODE: frozenset(("tbl1", "tbl2", "tbl3", "tbl4")),
     FOUNDATION_MODE: frozenset(("tbl5", "tbl6", "tbl7")),
 }
+METADATA_PREFIXES = {
+    UPPER_MODE: "Upper.",
+    FOUNDATION_MODE: "Foundation.",
+}
 
 
 class HandoffUpdateError(RuntimeError):
@@ -37,9 +41,35 @@ def _quote_identifier(name):
     return '"' + str(name).replace('"', '""') + '"'
 
 
+def _is_unc_path(path):
+    """Return whether *path* uses a Windows UNC spelling."""
+    text = os.fspath(path).replace("/", "\\")
+    return text.startswith("\\\\")
+
+
+def open_read_only_connection(path):
+    """Open SQLite without permitting writes, including for UNC paths.
+
+    SQLite URI authorities reject ``file://server/share`` in the builds used
+    by this project.  UNC paths therefore use the native filename together
+    with ``PRAGMA query_only``; local paths retain the stronger ``mode=ro``
+    URI open.  Callers still receive the same sqlite3 connection interface.
+    """
+    expanded = Path(path).expanduser()
+    if not expanded.is_file():
+        raise FileNotFoundError("SQLite database does not exist: " + str(expanded))
+    is_unc = _is_unc_path(expanded)
+    resolved = expanded if is_unc else expanded.resolve()
+    if is_unc:
+        connection = sqlite3.connect(str(resolved))
+        connection.execute("PRAGMA query_only=ON")
+    else:
+        connection = sqlite3.connect(resolved.as_uri() + "?mode=ro", uri=True)
+    return connection
+
+
 def _read_only_connection(path):
-    uri = Path(path).resolve().as_uri() + "?mode=ro"
-    connection = sqlite3.connect(uri, uri=True)
+    connection = open_read_only_connection(path)
     connection.execute("BEGIN")
     return connection
 
@@ -115,6 +145,7 @@ def _schema_objects(connection):
 def _protected_scope_sha256(path, mode):
     """Hash every database object the selected extractor is not allowed to alter."""
     allowed_tables = TARGET_TABLES[mode]
+    allowed_metadata_prefix = METADATA_PREFIXES[mode]
     digest = hashlib.sha256()
     connection = _read_only_connection(path)
     try:
@@ -125,10 +156,10 @@ def _protected_scope_sha256(path, mode):
         table_names = []
         for object_type, name, table_name, sql in _schema_objects(connection):
             belongs_to_target = name in allowed_tables or table_name in allowed_tables
-            foundation_meta = mode == FOUNDATION_MODE and (
+            shared_meta = (
                 name == "handoff_meta" or table_name == "handoff_meta"
             )
-            if belongs_to_target or foundation_meta:
+            if belongs_to_target or shared_meta:
                 continue
             _feed(digest, ["schema", object_type, name, table_name, sql])
             if object_type == "table":
@@ -137,32 +168,38 @@ def _protected_scope_sha256(path, mode):
         for table_name in sorted(table_names):
             _feed(digest, _table_payload(connection, table_name))
 
-        if mode == FOUNDATION_MODE:
-            tables = {
-                row[0]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                )
-            }
-            if "handoff_meta" not in tables:
-                _feed(digest, ["handoff_meta-nonfoundation", []])
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if "handoff_meta" not in tables:
+            _feed(digest, ["handoff_meta-schema", "KeyValue-v1"])
+            _feed(digest, ["handoff_meta-protected", []])
+        else:
+            column_rows = list(
+                connection.execute("PRAGMA table_info(handoff_meta)")
+            )
+            expected_schema = (
+                len(column_rows) == 2
+                and [row[1] for row in column_rows] == ["Key", "Value"]
+                and all(str(row[2]).upper() == "TEXT" for row in column_rows)
+                and column_rows[0][5] == 1
+                and column_rows[1][3] == 1
+            )
+            if not expected_schema:
+                _feed(digest, _table_payload(connection, "handoff_meta"))
             else:
-                columns = {
-                    row[1]
-                    for row in connection.execute("PRAGMA table_info(handoff_meta)")
-                }
-                if "Key" not in columns:
-                    _feed(digest, _table_payload(connection, "handoff_meta"))
-                else:
-                    payload = _table_payload(
-                        connection,
-                        "handoff_meta",
-                        lambda values: not str(values.get("Key", "")).startswith("Foundation."),
-                    )
-                    _feed(
-                        digest,
-                        ["handoff_meta-nonfoundation", payload["rows"]],
-                    )
+                _feed(digest, ["handoff_meta-schema", "KeyValue-v1"])
+                payload = _table_payload(
+                    connection,
+                    "handoff_meta",
+                    lambda values: not str(values.get("Key", "")).startswith(
+                        allowed_metadata_prefix
+                    ),
+                )
+                _feed(digest, ["handoff_meta-protected", payload["rows"]])
         return digest.hexdigest().upper()
     finally:
         connection.rollback()
@@ -212,18 +249,20 @@ def foundation_contract_sha256(path):
                 for row in connection.execute("PRAGMA table_info(handoff_meta)")
             }
             if "Key" in columns:
-                _feed(
-                    digest,
-                    _table_payload(
-                        connection,
-                        "handoff_meta",
-                        lambda values: str(values.get("Key", "")).startswith("Foundation."),
+                payload = _table_payload(
+                    connection,
+                    "handoff_meta",
+                    lambda values: str(values.get("Key", "")).startswith(
+                        "Foundation."
                     ),
                 )
+                _feed(digest, ["Foundation.*", payload["rows"]])
             else:
                 _feed(digest, ["Foundation.*", "unreadable"])
         else:
-            _feed(digest, ["Foundation.*", "absent"])
+            # Creating the shared metadata table with Upper.* rows must not
+            # look like a foundation-contract change.
+            _feed(digest, ["Foundation.*", []])
         return digest.hexdigest().upper()
     finally:
         connection.rollback()

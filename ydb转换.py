@@ -4,7 +4,7 @@
 The first columns of tbl1/tbl2/tbl3/tbl4 are a compatibility contract with the
 existing Revit add-in. PEC data is deliberately compact:
 
-* PEC beam/column H sections use ``H{h}x{b}x{tw}x{tf}@PEC``.  Ordinary Kind-2
+* PEC beam/column H sections use ``H{h}X{b}X{tw}X{tf}@PEC``.  Ordinary Kind-2
   H columns located at a PEC main-wall endpoint are PEC end columns and remain
   independent tbl2 members.
 * Every straight wall leg is one tbl4 row.
@@ -18,6 +18,7 @@ existing Revit add-in. PEC data is deliberately compact:
 """
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -26,13 +27,20 @@ import struct
 from pathlib import Path
 
 from foundation_handoff import convert_foundation_ydb, is_foundation_ydb
-from handoff_atomic import UPPER_MODE, atomic_update_database
+from handoff_atomic import (
+    UPPER_MODE,
+    atomic_update_database,
+    open_read_only_connection,
+)
 
 
 PEC_WALL_KINDS = {211, 212}
 PEC_MAIN_WALL_KIND = 211
 PEC_SECONDARY_WALL_KIND = 212
 WINFO_VERSION = 4
+UPPER_SCHEMA_VERSION = 1
+UPPER_CONTRACT_VERSION = "UPPER_HANDOFF_V1"
+COLUMN_PLACEMENT_VERSION = 1
 
 # ---------------------------------------------------------------------------
 # 截面文本契约：与 CreateNewExtern/SectionTextParser.cs 保持一致。
@@ -105,6 +113,14 @@ def _decode_sqlite_text(raw):
         except UnicodeDecodeError:
             pass
     return raw.decode("utf-8", "replace")
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest().upper()
 
 
 def _quote_identifier(name):
@@ -267,14 +283,25 @@ def _packed_hot_rolled_h_dimensions(subsection):
     height = fields[10] / 65536.0
     width = fields[9] / 65536.0
     parts = name.split("X")
-    if len(parts) == 4 and parts[0].startswith("H") and not parts[0][1:3].isdigit():
+    # Four-part custom names carry the web/flange thicknesses themselves.
+    # Do not reject names whose height starts with two digits (H400..., H600...)
+    # merely because the first token is numeric.
+    if len(parts) == 4 and parts[0].startswith("H"):
         # 四段式自定义名称 "H400X200X8X13"：厚度直接在名称里。
         try:
-            if abs(float(parts[0][1:]) - height) > 0.5:
+            named_height = float(parts[0][1:])
+            named_width = float(parts[1])
+            web = float(parts[2])
+            flange = float(parts[3])
+            if any(value <= 0 for value in (
+                height, width, named_height, named_width, web, flange
+            )):
                 return None
-            if abs(float(parts[1]) - width) > 0.5:
+            if abs(named_height - height) > 0.5:
                 return None
-            return height, width, float(parts[2]), float(parts[3])
+            if abs(named_width - width) > 0.5:
+                return None
+            return height, width, web, flange
         except ValueError:
             return None
     if len(parts) == 2 and parts[0][:2] in ("HW", "HM", "HN"):
@@ -413,6 +440,12 @@ def _orient_from_corner(record, corner_joint_id):
         record["output_reversed"] = False
         return
     record["start"], record["end"] = record["end"], record["start"]
+    # The top elevations belong to the corresponding endpoint too.  Keeping
+    # them in source order after reversing the XY endpoints creates a subtly
+    # wrong sloped L-leg (WTopZ and WTopZ2 are then attached to opposite ends).
+    record["top_start_z"], record["top_end_z"] = (
+        record["top_end_z"], record["top_start_z"]
+    )
     record["output_jt1_id"], record["output_jt2_id"] = (
         record["output_jt2_id"], record["output_jt1_id"]
     )
@@ -515,12 +548,7 @@ def _convert_ydb_in_place(source_path, destination_path):
         raise ValueError("Source YDB and destination database must be different files")
 
     destination_path.parent.mkdir(parents=True, exist_ok=True)
-    # UNC 路径（\\server\share\...）经 as_uri() 会生成 file://server/...，
-    # SQLite 拒绝非 localhost 的 URI authority，因此 UNC 时退回普通路径打开。
-    if source_path.drive.startswith("\\\\"):
-        source = sqlite3.connect(str(source_path))
-    else:
-        source = sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True)
+    source = open_read_only_connection(source_path)
     source.row_factory = sqlite3.Row
     source.text_factory = _decode_sqlite_text
 
@@ -586,9 +614,9 @@ def _convert_ydb_in_place(source_path, destination_path):
 
         ydb 无弧元数据（无弧表、tblGrid.idCen 全哨兵、梁段无标志字段），
         YJK 导出时把弧梁离散为弦线段；判定 = 同层首尾相连 ≥3 段、且链上
-        每个节点转角在 0.03°~15°（真折梁的构造转角通常更大，共线续接
-        则为 0°）。阈值以颛桥实测校准（17 链 / 60 段），依据
-        handoff-Python端-弧梁标记列BIsArc.md 的判定权授约定。
+        每个节点转角在 0.1°~40°、转向单调且累计转角 ≥1.5°；共线续接
+        不标。按 2026-09-07 决定保留现有启发式，只供 Revit 亮显人工复核，
+        不作为圆弧几何真值。
         """
         segments = {}
         adjacency = {}
@@ -1090,6 +1118,35 @@ def _convert_ydb_in_place(source_path, destination_path):
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_tbl4_leg "
                 "ON tbl4(WLegID) WHERE WLegID IS NOT NULL"
             )
+            destination.execute("""
+                CREATE TABLE IF NOT EXISTS handoff_meta (
+                    Key TEXT PRIMARY KEY,
+                    Value TEXT NOT NULL
+                )
+            """)
+            destination.execute(
+                "DELETE FROM handoff_meta WHERE Key LIKE 'Upper.%'"
+            )
+            upper_metadata = {
+                "Upper.SchemaVersion": str(UPPER_SCHEMA_VERSION),
+                "Upper.ContractVersion": UPPER_CONTRACT_VERSION,
+                "Upper.ContractTables": "tbl1,tbl2,tbl3,tbl4",
+                "Upper.CoordinateUnit": "mm",
+                "Upper.AngleUnit": "degree",
+                "Upper.ColumnPlacementVersion": str(COLUMN_PLACEMENT_VERSION),
+                "Upper.ColumnTopSemantics": "TRUE_TOP_Z",
+                "Upper.ColumnWallEndRule": "DERIVE_FROM_TBL4_WINFO",
+                "Upper.Features": (
+                    "BISARC_HINT_V1,BZOFFSET_V1,COLUMN_ECC_ROTATION_V1,"
+                    "COLUMN_TRUE_TOP_V1,WINFO_V4,WTOP_V1"
+                ),
+                "Upper.SourceFile": str(source_path),
+                "Upper.SourceSHA256": _file_sha256(source_path),
+            }
+            destination.executemany(
+                "INSERT OR REPLACE INTO handoff_meta(Key,Value) VALUES (?,?)",
+                sorted(upper_metadata.items()),
+            )
     finally:
         destination.close()
         source.close()
@@ -1104,14 +1161,14 @@ def _convert_ydb_in_place(source_path, destination_path):
                 len(adjusted_column_tops), samples,
                 " 等" if len(adjusted_column_tops) > 3 else ""))
     if main_value_fallback_sections:
-        warnings = [
+        warnings.extend([
             "%s截面 SectID=%s 无子表定义，截面取主表数值（%d 根构件）" % (
                 member_kind, sect_id, count)
             for (member_kind, sect_id), count in sorted(
                 main_value_fallback_sections.items(),
                 key=lambda item: (item[0][0], _as_int(item[0][1])),
             )
-        ]
+        ])
 
     return {
         "source": str(source_path),
@@ -1123,6 +1180,8 @@ def _convert_ydb_in_place(source_path, destination_path):
         "pec_wall_groups": group_counter,
         "arc_beam_segments": len(arc_beam_segment_ids),
         "column_tops_adjusted": len(adjusted_column_tops),
+        "contract_version": UPPER_CONTRACT_VERSION,
+        "column_placement_version": COLUMN_PLACEMENT_VERSION,
         "warnings": warnings,
     }
 

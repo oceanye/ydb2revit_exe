@@ -279,6 +279,44 @@ class FoundationHandoffTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_upper_and_foundation_metadata_survive_both_extractors(self):
+        upper_source = ROOT / "施工图-墙" / "dtlmodelsw.ydb"
+        CONVERTER.convert_ydb(upper_source, self.output)
+        connection = sqlite3.connect(self.output)
+        try:
+            upper_before = dict(connection.execute(
+                "SELECT Key,Value FROM handoff_meta WHERE Key LIKE 'Upper.%'"
+            ))
+        finally:
+            connection.close()
+
+        convert_foundation_ydb(self.source, self.output)
+        connection = sqlite3.connect(self.output)
+        try:
+            self.assertEqual(
+                upper_before,
+                dict(connection.execute(
+                    "SELECT Key,Value FROM handoff_meta WHERE Key LIKE 'Upper.%'"
+                )),
+            )
+            foundation_before = dict(connection.execute(
+                "SELECT Key,Value FROM handoff_meta WHERE Key LIKE 'Foundation.%'"
+            ))
+        finally:
+            connection.close()
+
+        CONVERTER.convert_ydb(upper_source, self.output)
+        connection = sqlite3.connect(self.output)
+        try:
+            self.assertEqual(
+                foundation_before,
+                dict(connection.execute(
+                    "SELECT Key,Value FROM handoff_meta WHERE Key LIKE 'Foundation.%'"
+                )),
+            )
+        finally:
+            connection.close()
+
     def test_legacy_foundation_rebar_is_read_but_preserved_outside_tbl5_to_tbl7(self):
         convert_foundation_ydb(self.source, self.output)
         type_key = read_editor_data(self.output)["cap_types"][0]["TypeKey"]

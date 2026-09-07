@@ -27,7 +27,11 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from handoff_atomic import FOUNDATION_MODE, atomic_update_database
+from handoff_atomic import (
+    FOUNDATION_MODE,
+    atomic_update_database,
+    open_read_only_connection,
+)
 
 
 FOUNDATION_SCHEMA_VERSION = 2
@@ -88,9 +92,7 @@ def _json(value):
 
 
 def _source_connection(path):
-    source_path = Path(path).expanduser().resolve()
-    uri = source_path.as_uri() + "?mode=ro"
-    connection = sqlite3.connect(uri, uri=True)
+    connection = open_read_only_connection(path)
     connection.row_factory = sqlite3.Row
     return connection
 
@@ -664,6 +666,9 @@ def _convert_foundation_ydb_in_place(source_path, destination_path):
                     ),
                 )
 
+            destination.execute(
+                "DELETE FROM handoff_meta WHERE Key LIKE 'Foundation.%'"
+            )
             metadata = {
                 "Foundation.SchemaVersion": str(FOUNDATION_SCHEMA_VERSION),
                 "Foundation.DataSource": "YDB_ONLY",

@@ -238,9 +238,9 @@ footer {
 
   <div class="stat-row">
     <div class="stat"><div class="v">7<small>张</small></div><div class="l">中间数据表 tbl1–tbl7</div></div>
-    <div class="stat"><div class="v">31<small>个</small></div><div class="l">回归测试 · 全部通过</div></div>
-    <div class="stat"><div class="v">3,043<small>行</small></div><div class="l">Python 主代码（另含 1,010 行测试）</div></div>
-    <div class="stat"><div class="v">5<small>份</small></div><div class="l">跨端交接协议文档</div></div>
+    <div class="stat"><div class="v">53<small>个</small></div><div class="l">回归测试 · 全部通过</div></div>
+    <div class="stat"><div class="v">2,906<small>行</small></div><div class="l">Python 主代码（另含 1,787 行测试）</div></div>
+    <div class="stat"><div class="v">24<small>份</small></div><div class="l">跨端交接与技术文档</div></div>
     <div class="stat"><div class="v">0<small>个</small></div><div class="l">第三方运行时依赖</div></div>
   </div>
 
@@ -305,15 +305,16 @@ footer {
 <!-- ========== 03 目录结构 ========== -->
 <section id="s3">
   <h2><span class="no">03</span>目录结构</h2>
-<pre class="tree">E:\ydb2revit_exe\
-├── <b>ydb转换.py</b>            <span class="cmt">★ 主转换器 + CLI 入口（892 行）：上部结构 → tbl1–tbl4</span>
-├── <b>foundation_handoff.py</b>  基础承台/桩提取（871 行）→ tbl5–tbl7 + 配筋恢复
-├── <b>handoff_atomic.py</b>      中间库原子安全更新（367 行）：范围指纹 / 并发防护
+<pre class="tree">ydb2revit_exe\
+├── <b>ydb转换.py</b>            <span class="cmt">★ 主转换器 + CLI 入口（1,340 行）：上部结构 → tbl1–tbl4</span>
+├── <b>foundation_handoff.py</b>  基础承台/桩提取（873 行）→ tbl5–tbl7 + 配筋恢复
+├── <b>handoff_atomic.py</b>      中间库原子安全更新（406 行）：范围指纹 / 并发防护
 ├── <b>foundation_web.py</b>      本机配筋补录 Web 服务器（287 行，单文件零依赖）
 ├── ydb转换.spec                PyInstaller 打包配置 → dist\ydb转换.exe
 │
-├── handoff_doc\                <span class="cmt">5 份跨端交接协议文档（Markdown）</span>
-│   ├── YJK坐标系与梁柱偏心定义.md              <span class="cmt">坐标系 / 偏心语义基准</span>
+├── handoff_doc\                <span class="cmt">24 份跨端交接与技术文档（Markdown）</span>
+│   ├── handoff-Revit端-柱偏心旋转与近期接口联动-20260907.md <span class="cmt">当前柱/标高/扩展列权威契约</span>
+│   ├── YJK坐标系与梁柱偏心定义.md              <span class="cmt">坐标系 / 偏心历史调研</span>
 │   ├── handoff-python-PEC墙提取与Revit建模.md   <span class="cmt">WInfo v4 协议（更新 2026-08-26）</span>
 │   ├── handoff-python-基础承台桩提取与配筋补录.md
 │   ├── handoff-python-梁偏心导出.md
@@ -321,10 +322,10 @@ footer {
 │
 ├── tools\
 │   └── export_pec_wall_check_dxf.py   PEC 墙参数核对 DXF 导出（626 行）
-├── tests\                      31 个回归测试（unittest · 2.4s 全过）
-│   ├── test_pec_conversion.py      PEC 墙 / 截面 / 楼层引用（18 例）
-│   ├── test_foundation_handoff.py  基础提取 / 归并 / Web API（12 例）
-│   └── test_atomic_handoff.py      原子更新 / 范围保护（4 例）
+├── tests\                      53 个回归测试（pytest/unittest）
+│   ├── test_pec_conversion.py      PEC 墙 / 截面 / 楼层 / 版本契约
+│   ├── test_foundation_handoff.py  基础提取 / 归并 / Web API
+│   └── test_atomic_handoff.py      原子更新 / 范围保护 / UNC 只读
 │
 ├── PEC剪力墙测试\              dtlmodel_PECWall.ydb + L+1.dxf 测试样本
 ├── 基础部分模型\                jccad.ydb + foundation_handoff.db 样本
@@ -338,7 +339,7 @@ footer {
 <section id="s4">
   <h2><span class="no">04</span>核心模块详解</h2>
 
-  <h3>4.1 主转换器 <span class="fh">ydb转换.py · 892 行</span></h3>
+  <h3>4.1 主转换器 <span class="fh">ydb转换.py · 1,340 行</span></h3>
   <p>CLI 入口 <code>main()</code>（<code>ydb转换.py:829</code>）→ <code>convert_auto_ydb()</code> 按表结构自动分流上部/基础 → <code>_convert_ydb_in_place()</code>（<code>ydb转换.py:342</code>）执行提取。
   文本解码自动兼容 UTF-8 / gb18030 / gbk。</p>
   <div class="tbl-wrap"><table class="tbl">
@@ -385,7 +386,7 @@ footer {
   <h3>4.5 校核工具 <span class="fh">tools/export_pec_wall_check_dxf.py · 626 行</span></h3>
   <p>把转换结果按 WInfo v4 定位规则 <strong>1:1（mm）</strong>绘制 DXF：墙节点线、混凝土轮廓、墙端 H（按公式计算位置与旋转，<em>不读</em> tbl2 偏心列）、Main 腹板、加劲板、Secondary 腹板与 T 翼缘、参数图例与标注尺寸。产物见 <code>validation_output/</code>，用于人工核对 Revit 建模参数。</p>
 
-  <h3>4.6 测试 <span class="fh">tests/ · 31 例 · 2.4s</span></h3>
+  <h3>4.6 测试 <span class="fh">tests/ · 53 例</span></h3>
   <p>纯标准库 unittest，用 <code>importlib</code> 从文件路径加载被测模块；测试夹具为「匿名最小 YDB 形状数据库」+ 仓库内真实样本（存在时追加验证）。覆盖要点：PEC 截面后缀、L/I 分组可追溯性、WInfo 完整性、墙端 H 归零、按自然层实例的 tbl2 引用、基础型号归并（顶点序/旋转无关）、配筋跨重提存活、原子更新的逐字节不变与范围拒绝。</p>
 </section>
 
@@ -396,12 +397,13 @@ footer {
   <h3>5.1 上部结构表</h3>
   <div class="tbl-wrap"><table class="tbl">
     <tr><th class="ctr">下标</th><th>字段</th><th>含义 / 来源</th></tr>
-    <tr><td colspan="3" style="color:var(--muted)">tbl1（梁 + 斜撑 · 15 列）</td></tr>
+    <tr><td colspan="3" style="color:var(--muted)">tbl1（梁 + 斜撑 · 18 列）</td></tr>
     <tr><td class="ctr">0–5</td><td><code>BStartX … BEndZ</code></td><td>梁/撑起终点坐标（mm）；Z = 层顶 + 节点 HDiff + 杆件 HDiff1/2</td></tr>
     <tr><td class="ctr">6</td><td><code>BSection</code></td><td>截面字符串；PEC 统一 <code>H{h}x{b}x{tw}x{tf}@PEC</code>（如 H300x200x8x20@PEC），C# 端凭 <code>@PEC</code> 后缀识别</td></tr>
     <tr><td class="ctr">7–9</td><td><code>Tag / ID / RvtID</code></td><td>状态预留 / 输出库内连续行号 / Revit 回写 ElementId</td></tr>
     <tr><td class="ctr">10–11</td><td><code>BSConn / BEConn</code></td><td>梁起/终点连接（tblProperty.SpBeam）</td></tr>
     <tr><td class="ctr">12–14</td><td><code>Ecc / Ecc2 / BRotation</code></td><td><strong>梁偏心</strong>（mm 带符号，垂直梁轴水平向）+ 旋转（度）；斜撑无偏心回填 0；Ecc2 缺省回退 Ecc</td></tr>
+    <tr><td class="ctr">15–17</td><td><code>BZOffset / BZOffset2 / BIsArc</code></td><td>两端相对参考层的标高偏移；现有弧梁启发式亮显标记</td></tr>
   </table></div>
 
   <div class="tbl-wrap"><table class="tbl">
@@ -414,13 +416,14 @@ footer {
     <tr><td class="ctr">0–1</td><td><code>Floor / LevelB</code></td><td><code>1F…nF + RF</code> 与标高（mm）；RF = 末层 LevelB + Height</td></tr>
   </table></div>
 
-  <h3>5.2 tbl4（墙肢 · 17 列）与 PEC 墙协议</h3>
+  <h3>5.2 tbl4（墙肢 · 19 列）与 PEC 墙协议</h3>
   <div class="tbl-wrap"><table class="tbl">
     <tr><th class="ctr">下标</th><th>字段</th><th>含义</th></tr>
     <tr><td class="ctr">0–5</td><td><code>WStartX … WEndZ</code></td><td>墙肢定位线（L 墙两肢 WStart 相同 = 公共角点）</td></tr>
     <tr><td class="ctr">6</td><td><code>WSection</code></td><td>混凝土墙厚 B；墙长 = |WEnd − WStart|（不得用 Dis1）</td></tr>
     <tr><td class="ctr">10–11</td><td><code>BottomFloor / WEConn</code></td><td>底部标准层 / 连接预留</td></tr>
     <tr><td class="ctr">12–16</td><td><code>WGroupID / WLegID / WLegRole / WShape / WInfo</code></td><td>逻辑墙组 <code>PECW0001</code> / 肢号 <code>-L1·-L2</code> / <code>MAIN·SECONDARY</code> / 平面组合 <code>I·L</code> / JSON（v4）</td></tr>
+    <tr><td class="ctr">17–18</td><td><code>WTopZ / WTopZ2</code></td><td>墙起、终端真实顶绝对标高（mm）</td></tr>
   </table></div>
   <p>索引：<code>idx_tbl2_id</code>（唯一）、<code>idx_tbl4_group</code>、<code>idx_tbl4_leg</code>（唯一，部分索引）。Main 钢构 = <strong>I</strong>（两端 H + 中间腹板 + 可选加劲板）；Secondary 钢构 = <strong>T</strong>（腹板 + 外端翼缘，尾部连 Main 角点 H）。墙内钢板与钢筋<strong>只写参数不建实体</strong>。</p>
 
@@ -489,10 +492,11 @@ py .\foundation_web.py ".\ydb转换数据库.db"</pre>
   </ul>
 
   <h3>开发与打包</h3>
-<pre>py -m unittest discover -s tests      <span class="cmt"># 31 例回归（stdout 末行 OK）</span>
+<pre>python -m pip install -r requirements-dev.txt
+pytest -q                              <span class="cmt"># 53 例回归</span>
 py tools\export_pec_wall_check_dxf.py &lt;dtlmodel.ydb&gt; -o .\validation_output\核对.dxf
-pyinstaller ydb转换.spec              <span class="cmt"># 重新打包 dist\ydb转换.exe（改 ydb转换.py 后必须重打包）</span></pre>
-  <div class="note orange">本机注意：<code>python</code> 不在 PATH，须用 <code>py</code>（Python 3.13）；工程纯标准库实现，无需 pip install 任何包。</div>
+python -m PyInstaller --clean --noconfirm ydb转换.spec <span class="cmt"># 重建 dist\ydb转换.exe</span></pre>
+  <div class="note orange">运行时仍为 Python 标准库；测试与构建工具的固定版本见 <code>requirements-dev.txt</code>，基线 Python 3.12。</div>
 </section>
 
 <!-- ========== 07 样本验证 ========== -->
@@ -519,7 +523,7 @@ pyinstaller ydb转换.spec              <span class="cmt"># 重新打包 dist\yd
 <section id="s8">
   <h2><span class="no">08</span>当前状态与路线图</h2>
 
-  <h3>已完成 <span class="fh">全部 31 测试通过</span></h3>
+  <h3>已完成 <span class="fh">全部 53 测试通过</span></h3>
   <ul>
     <li><span class="badge b-good">已完成</span> 上部结构 + 基础两条提取管线，写入同一统一数据库</li>
     <li><span class="badge b-good">已完成</span> PEC 梁/柱/墙提取与 WInfo v4 协议（I/L 分组、墙端 H 引用）</li>
@@ -541,7 +545,8 @@ pyinstaller ydb转换.spec              <span class="cmt"># 重新打包 dist\yd
 
   <h3>已知下游问题</h3>
   <ul>
-    <li><span class="badge b-serious">待评估</span> C# 端柱偏心变换把<strong>度</strong>的 <code>Rotation</code> 当弧度使用（<code>SqliteDataToRevit.cs:206-219</code>），带转角的偏心柱会算错位 —— 详见《YJK坐标系与梁柱偏心定义.md》§5.2。</li>
+    <li><span class="badge b-good">已复核</span> 活动 DLL 已把柱 <code>Rotation</code> 从度转换为弧度；组合偏心旋转公式和验收点见 2026-09-07 Revit handoff。</li>
+    <li><span class="badge b-serious">待插件集成</span> 活动 DLL 尚未消费 <code>BZOffset/WTopZ/WTopZ2/BIsArc</code>，并需把 <code>CEndZ</code> 按最近 Level + 顶部偏移建模。</li>
     <li><span class="badge b-serious">待确认</span> <code>Ecc</code> 与 <code>Ecc2</code> 是否分别为梁起/终点两端偏心：现有模型恒等，需做两端不同的测试梁验证。</li>
   </ul>
 </section>
