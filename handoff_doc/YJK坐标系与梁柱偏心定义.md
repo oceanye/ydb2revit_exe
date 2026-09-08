@@ -4,6 +4,9 @@
 > `handoff-Revit端-柱偏心旋转与近期接口联动-20260907.md`。本文保留早期
 > 调研过程；其中“柱端把 degree 当 radian”和“tbl1 没有梁偏心列”均已解决，
 > 不得再作为当前实现结论。
+>
+> 2026-09-08 修订：项目 1 节点 341 与 PEC 墙端 H 的独立几何复核确认，
+> 柱偏心真值公式应为旧公式的整体相反数；以下第 5.2 节已同步修正。
 
 > 用途：为"ydb → ydb转换数据库.db → Revit"管线中梁柱偏心的读取与生成提供定义基准。
 > 来源：① 同济大学学报《基于工业基础类标准的参数化实体模型数据交互技术》(张其林等, 2021)；
@@ -83,15 +86,15 @@ CombineBeam: id, StartX..EndZ, ShapeValue, Info(GKL/GL)                       �
 - 实测 `tblBeamSeg.Ecc`：`{0, +25, −23}` mm，带符号；`Ecc2` 与 `Ecc` 等值（疑为起/终点两端值）；梁 `Rotation=0`。
 - 实测 `tblColSeg.Rotation = 90.0`（**度**）。
 
-### 5.2 柱变换公式（`SqliteDataToRevit.cs:206-219`，含反射）
+### 5.2 柱变换公式（YJK 真值与插件修正目标）
 ```
-ΔX = EccX·cosθ + EccY·sinθ
-ΔY = EccX·sinθ − EccY·cosθ        // θ=Rotation×π/180
+ΔX = −EccX·cosθ − EccY·sinθ
+ΔY = −EccX·sinθ + EccY·cosθ        // θ=Rotation×π/180
 ```
-代入样例(θ=0,EccY=200) → ΔX=0, ΔY=−200（正 EccY 在 θ=0 时偏 −Y）。
-> 2026-09-07 复核：实际清单加载的 DLL 已先把 `Rotation` 从 degree 转为
-> radian，再同时用于三角函数和 Revit 旋转；组合偏心+旋转路径正确。新数据端
-> 同时写入 `Upper.AngleUnit=degree` 与 `Upper.ColumnPlacementVersion=1`。
+代入样例(θ=0,EccY=200) → ΔX=0, ΔY=+200（正 EccY 在 θ=0 时偏 +Y）。
+> 2026-09-08 复核：实际清单加载的 DLL 已先把 `Rotation` 从 degree 转为
+> radian，但现有平移公式与上述真值整体反号，必须由插件端修正。数据端仍原样
+> 传递三个字段，并写入 `Upper.AngleUnit=degree` 与 `Upper.ColumnPlacementVersion=1`。
 
 ### 5.3 梁的目标公式（反推，待 Python 与测试模型定符号）
 设梁水平单位轴向 `t=(tx,ty)`，水平垂直方向 `n = U1×U2 = (ty, −tx)`：

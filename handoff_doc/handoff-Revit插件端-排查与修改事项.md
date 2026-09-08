@@ -7,6 +7,10 @@
 本机插件已回滚至原版 dll（纯净备份 `CreateNewExtern.dll.bak-20260831`），
 钢板功能按本 handoff 安排独立实现。
 
+> 2026-09-08 更新：事项 2 的角度单位问题已经修复，但进一步实模复核确认
+> 原偏心平移公式整体反号。柱定位以
+> `handoff-Revit端-柱偏心旋转与近期接口联动-20260907.md` 的修订版为准。
+
 ## 事项 1（高优先 · 功能新增）：PEC 主墙钢板实体生成
 
 **详见同目录《需求-CSharp插件-PEC墙钢板实体生成.md》**（输入数据契约、定位公式、
@@ -21,15 +25,16 @@
   `ElementId` 无 long 构造；
 * 参考实现（可选采用）：`revit_addin/PecStiffenerCommand.cs`。
 
-## 事项 2（中优先 · Bug 排查）：柱偏心变换的角度单位错误
+## 事项 2（高优先 · Bug 修正）：柱偏心变换的整体符号错误
 
 * 位置：`SqliteDataToRevit.cs:206-219`；
-* 现象：偏心变换 `ΔX = EccX·cosθ + EccY·sinθ；ΔY = EccX·sinθ − EccY·cosθ` 中
-  θ 按**弧度**使用，而 `tblColSeg.Rotation` 实测为**度**（样例 90.0）——带转角的
-  偏心柱会算错位（EccX=0、θ=90 时应得 ΔX=EccY，实得 ΔY=EccY·cos(90rad)≠0）；
-* 建议：统一度→弧度换算；用 EccX=0、EccY=200、Rotation=90 的柱实测验证
-  （正确结果应为 ΔX=200、ΔY=0）；
-* 依据：《YJK坐标系与梁柱偏心定义.md》§5.2（含实测数据）。
+* `Rotation` 从 degree 转 radian 已在活动 DLL 中落实；
+* 当前插件平移公式仍是 YJK 真值的整体相反数，必须改为
+  `ΔX=−EccX·cosθ−EccY·sinθ；ΔY=−EccX·sinθ+EccY·cosθ`；
+* 零转角 `EccY=+200` 应沿全局 `+Y` 移动 200 mm；`Rotation=90°` 的
+  正方向仍需与 YJK 屏显样本做最终验收；
+* 依据：《YJK坐标系与梁柱偏心定义.md》§5.2、
+  《handoff-插件端-柱偏心Ecc整体反号修正.md》及主 Revit handoff。
 
 ## 事项 3（中优先 · 语义确认）：梁偏心 Ecc 与 Ecc2 是否为两端值
 
