@@ -8,6 +8,8 @@
 
 ## 1. 新规则（`ydb转换.py` `_gb_thickness_override`）
 
+**Kind=209 有子表时，主表 `tblBeamSect.t/d/u/f` 不作为几何来源；高度、宽度和厚度字段先严格按 `tblSubSectionSect` 解析。** 主表只用于告警中的对比，不能覆盖子表。
+
 **Kind=209 PEC 截面、子表为 Kind=12 数值自定义形态（无 Kind-26 打包串），
 且 (H,B) 命中唯一 GB/T 11263 热轧 H 规格时——厚度按国标取，忽略主表/
 子表数值列的厚度。**

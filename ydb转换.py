@@ -361,8 +361,9 @@ def _gb_thickness_override(section, subsection):
         return None  # 子表 Kind=11（PEC 焊接H）等形态不适用
     if _packed_hot_rolled_h_dimensions(subsection) is not None:
         return None  # 打包串定义为准（既有优先级规则）
-    height = _first_positive(_value(section, "t"), _value(subsection, "t"), _value(subsection, "h"))
-    width = _first_positive(_value(section, "d"), _value(subsection, "d"), _value(subsection, "b"))
+    # Kind-209 主表 t/d/u/f 可能是编辑残留；只从子表的 H/B 识别目录规格。
+    height = _first_positive(_value(subsection, "h"), _value(subsection, "t"))
+    width = _first_positive(_value(subsection, "b"), _value(subsection, "d"))
     if height is None or width is None:
         return None
     return STANDARD_HOT_ROLLED_H_BY_SIZE.get(
@@ -383,15 +384,21 @@ def _h_dimensions(section, subsection=None):
         packed = _packed_hot_rolled_h_dimensions(subsection)
         if packed is not None:
             return packed
-        # YJK PEC beam/column: u=tw, t=H, d=W, f=tf.  The same values may
-        # also be repeated in tblSubSectionSect.
-        height = _first_positive(_value(section, "t"), _value(subsection, "t"), _value(subsection, "h"))
-        width = _first_positive(_value(section, "d"), _value(subsection, "d"), _value(subsection, "b"))
+        # YJK PEC beam/column: once a subsection exists, it is authoritative.
+        # The main tblBeamSect t/d/u/f values are not used for geometry.
+        if subsection is None:
+            height = _first_positive(_value(section, "t"))
+            width = _first_positive(_value(section, "d"))
+            web = _first_positive(_value(section, "u"))
+            flange = _first_positive(_value(section, "f"))
+        else:
+            height = _first_positive(_value(subsection, "h"), _value(subsection, "t"))
+            width = _first_positive(_value(subsection, "b"), _value(subsection, "d"))
+            web = _first_positive(_value(subsection, "u"))
+            flange = _first_positive(_value(subsection, "f"))
         gb = _gb_thickness_override(section, subsection)
         if gb is not None:
             return height, width, gb[0], gb[1]
-        web = _first_positive(_value(section, "u"), _value(subsection, "u"))
-        flange = _first_positive(_value(section, "f"), _value(subsection, "f"))
     elif kind == 2:
         # Existing symmetric H/I section: b=tw, h=H, u/d=W, t/f=tf.
         height = _first_positive(_value(section, "h"))

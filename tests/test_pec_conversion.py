@@ -1026,16 +1026,23 @@ class PecConversionTests(unittest.TestCase):
             result["warnings"],
         )
 
-    def test_custom_welded_size_without_gb_gauge_keeps_main_thickness(self):
-        # (600,150) 无国标规格：自定义焊接截面，主表厚度保留（33503 实证）。
+    def test_custom_welded_size_without_gb_gauge_keeps_subsection_thickness(self):
+        # (600,150) 无国标规格：自定义焊接截面，子表厚度保留（33503 实证）。
         result, sections = convert_single_209_beam(
-            (600, 150, 10, 16), ("numeric", (150, 600, 0, 0, 0, 0))
+            (999, 999, 1, 2), ("numeric", (150, 600, 10, 600, 150, 16))
         )
         self.assertEqual(["H600X150X10X16@PEC"], sections)
         self.assertFalse(
             any("国标" in warning for warning in result["warnings"]),
             result["warnings"],
         )
+
+    def test_kind209_subsection_is_authoritative_over_main_fields(self):
+        result, sections = convert_single_209_beam(
+            (350, 150, 6, 11), ("numeric", (200, 400, 8, 400, 200, 13))
+        )
+        self.assertEqual(["H400X200X8X13@PEC"], sections)
+        self.assertTrue(any("国标" in warning for warning in result["warnings"]))
 
     def test_subsection_numeric_thickness_at_gb_size_is_overridden(self):
         # 33508 真实形态：子表数值列镜像主表的脏值 12/18（SubKind=13 与
