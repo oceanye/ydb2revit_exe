@@ -1,0 +1,347 @@
+{
+  "cap_tables": {
+    "DEF_dais": 0,
+    "app_dais": 0,
+    "dais_pt": 0,
+    "dais_stepH": 0
+  },
+  "pile_definitions": [
+    {
+      "B": 600,
+      "F0": 0.0,
+      "F1": 1400.0,
+      "F1_Euro": 1200.0,
+      "F2": 250.0,
+      "F2_Euro": 400.0,
+      "H": 0,
+      "ID": 1,
+      "blade_D": 200,
+      "blade_dis": 500,
+      "idUp": 0,
+      "lID": 0,
+      "means": 3,
+      "nRebarArea": 0,
+      "name": 0,
+      "r2": 0,
+      "topd": 0,
+      "toph_b": 0,
+      "toph_m": 0,
+      "toph_u": 0,
+      "w": 0,
+      "weight": 25.0
+    }
+  ],
+  "piles": {
+    "boundary_examples": [
+      {
+        "raft_ids": [
+          10,
+          14
+        ],
+        "source_id": 577,
+        "z": -5800.0
+      },
+      {
+        "raft_ids": [
+          10,
+          14
+        ],
+        "source_id": 797,
+        "z": -5800.0
+      }
+    ],
+    "count": 801,
+    "exact_bottom_elevation_match_count": {
+      "0": 50,
+      "1": 749,
+      "2": 2
+    },
+    "exact_match_by_z": {
+      "-10000.0:1": 168,
+      "-10200.0:0": 20,
+      "-10200.0:1": 157,
+      "-5800.0:0": 30,
+      "-5800.0:1": 94,
+      "-5800.0:2": 2,
+      "-6100.0:1": 169,
+      "-9700.0:1": 161
+    },
+    "kind_counts": {
+      "0": 801
+    },
+    "outside_examples": [
+      {
+        "source_id": 1,
+        "x": 380.675389,
+        "y": 157435.703334,
+        "z": -10200.0
+      },
+      {
+        "source_id": 2,
+        "x": 8650.112248,
+        "y": 157435.703334,
+        "z": -10200.0
+      },
+      {
+        "source_id": 3,
+        "x": 15580.507349,
+        "y": 157435.703334,
+        "z": -10200.0
+      },
+      {
+        "source_id": 4,
+        "x": 22580.507349,
+        "y": 157435.703334,
+        "z": -10200.0
+      },
+      {
+        "source_id": 5,
+        "x": -6119.770306,
+        "y": 156725.18639,
+        "z": -10200.0
+      },
+      {
+        "source_id": 6,
+        "x": 380.643976,
+        "y": 154193.873944,
+        "z": -10200.0
+      },
+      {
+        "source_id": 7,
+        "x": 8650.112248,
+        "y": 154193.868524,
+        "z": -10200.0
+      },
+      {
+        "source_id": 8,
+        "x": 15580.604779,
+        "y": 154193.873944,
+        "z": -10200.0
+      },
+      {
+        "source_id": 9,
+        "x": 22580.466874,
+        "y": 154193.929274,
+        "z": -10200.0
+      },
+      {
+        "source_id": 10,
+        "x": 51455.612353,
+        "y": 154118.93035,
+        "z": -10200.0
+      }
+    ],
+    "spatial_candidate_count": {
+      "0": 50,
+      "1": 137,
+      "2": 614
+    },
+    "z_counts_mm": {
+      "-10200.0": 177,
+      "-10000.0": 168,
+      "-9700.0": 161,
+      "-6100.0": 169,
+      "-5800.0": 126
+    }
+  },
+  "raft_regions": {
+    "count": 14,
+    "point_count": 134,
+    "records": [
+      {
+        "base_z_raw": -7200.0,
+        "bottom_z_mm": -10200.0,
+        "geometry_id": 1,
+        "point_count": 10,
+        "source_id": 1,
+        "thickness_mm": 1000.0
+      },
+      {
+        "base_z_raw": -3500.0,
+        "bottom_z_mm": -6100.0,
+        "geometry_id": 3,
+        "point_count": 6,
+        "source_id": 2,
+        "thickness_mm": 800.0
+      },
+      {
+        "base_z_raw": -7200.0,
+        "bottom_z_mm": -10200.0,
+        "geometry_id": 4,
+        "point_count": 4,
+        "source_id": 3,
+        "thickness_mm": 1000.0
+      },
+      {
+        "base_z_raw": -7200.0,
+        "bottom_z_mm": -10000.0,
+        "geometry_id": 5,
+        "point_count": 4,
+        "source_id": 4,
+        "thickness_mm": 800.0
+      },
+      {
+        "base_z_raw": -7200.0,
+        "bottom_z_mm": -10000.0,
+        "geometry_id": 6,
+        "point_count": 4,
+        "source_id": 5,
+        "thickness_mm": 800.0
+      },
+      {
+        "base_z_raw": -3500.0,
+        "bottom_z_mm": -6100.0,
+        "geometry_id": 7,
+        "point_count": 7,
+        "source_id": 6,
+        "thickness_mm": 800.0
+      },
+      {
+        "base_z_raw": -7200.0,
+        "bottom_z_mm": -10200.0,
+        "geometry_id": 8,
+        "point_count": 6,
+        "source_id": 7,
+        "thickness_mm": 1000.0
+      },
+      {
+        "base_z_raw": -7200.0,
+        "bottom_z_mm": -9700.0,
+        "geometry_id": 9,
+        "point_count": 26,
+        "source_id": 8,
+        "thickness_mm": 500.0
+      },
+      {
+        "base_z_raw": -3500.0,
+        "bottom_z_mm": -5800.0,
+        "geometry_id": 10,
+        "point_count": 35,
+        "source_id": 9,
+        "thickness_mm": 500.0
+      },
+      {
+        "base_z_raw": -3500.0,
+        "bottom_z_mm": -6300.0,
+        "geometry_id": 2,
+        "point_count": 14,
+        "source_id": 10,
+        "thickness_mm": 1000.0
+      },
+      {
+        "base_z_raw": -7200.0,
+        "bottom_z_mm": -10200.0,
+        "geometry_id": 11,
+        "point_count": 6,
+        "source_id": 11,
+        "thickness_mm": 1000.0
+      },
+      {
+        "base_z_raw": -7200.0,
+        "bottom_z_mm": -10200.0,
+        "geometry_id": 12,
+        "point_count": 4,
+        "source_id": 12,
+        "thickness_mm": 1000.0
+      },
+      {
+        "base_z_raw": -7200.0,
+        "bottom_z_mm": -10200.0,
+        "geometry_id": 13,
+        "point_count": 4,
+        "source_id": 13,
+        "thickness_mm": 1000.0
+      },
+      {
+        "base_z_raw": -3500.0,
+        "bottom_z_mm": -5800.0,
+        "geometry_id": 14,
+        "point_count": 4,
+        "source_id": 14,
+        "thickness_mm": 1000.0
+      }
+    ]
+  },
+  "source": "C:\\Users\\bimpub5\\PycharmProjects\\ydb2revit_exe\\基础测试模型\\颛桥整体桩基-Jccad_0.ydb",
+  "tables": [
+    "Assistline",
+    "BotNodePos",
+    "CalPara",
+    "Cal_FuJiaYaLi",
+    "Cal_JiDiYaLi",
+    "Cal_MxMy",
+    "ChildRaft",
+    "DEF_CUP",
+    "DEF_DJ",
+    "DEF_Elevator",
+    "DEF_KJZ",
+    "DEF_LL",
+    "DEF_Pile",
+    "DEF_QL",
+    "DEF_RaftY",
+    "DEF_TJ",
+    "DEF_WaterPipe",
+    "DEF_WaterPit",
+    "DEF_ZD",
+    "DEF_brace",
+    "DEF_column",
+    "DEF_dais",
+    "DEF_fbeam",
+    "DEF_fwall",
+    "DEF_wall",
+    "HouJiaoDai",
+    "JCLoad",
+    "LoadV2_Arc_Show",
+    "LoadV2_Line_Cal",
+    "LoadV2_Line_Show",
+    "LoadV2_LoadCase",
+    "LoadV2_Point",
+    "LoadZH_Float",
+    "LoadZH_real",
+    "LoadZhuHe",
+    "Load_Arc",
+    "Load_Line",
+    "Load_ZiDingYi_Arc",
+    "Loads",
+    "LoadsFuJia_Line",
+    "LoadsFuJia_Point",
+    "LoadsLine",
+    "Loads_ZiDingYi_Line",
+    "Loads_ZiDingYi_Point",
+    "Loads_diaoche",
+    "Loads_line_diaoche",
+    "ParaNums",
+    "Points_Load",
+    "RaftCornerPoint",
+    "RaftOpenPos",
+    "RaftSlab",
+    "RaftYInfo",
+    "Raft_Wtf",
+    "TmpData",
+    "ZiDingYi_Name",
+    "app_DJ",
+    "app_Elevator",
+    "app_LL",
+    "app_Pile",
+    "app_QL",
+    "app_TJ",
+    "app_WaterPipe",
+    "app_WaterPit",
+    "app_brace",
+    "app_column",
+    "app_dais",
+    "app_fbeam",
+    "app_fwall",
+    "app_wall",
+    "axis",
+    "dais_Cir",
+    "dais_pt",
+    "dais_stepH",
+    "iwag",
+    "load_Chose",
+    "load_ZiDingYi_Line",
+    "node",
+    "other",
+    "ver"
+  ]
+}
