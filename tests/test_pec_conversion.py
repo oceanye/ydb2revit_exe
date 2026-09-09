@@ -95,6 +95,12 @@ def convert_single_209_beam(main_dims, subsection=None, sect_id=903):
                         "INSERT INTO tblSubSectionSect VALUES (?,12,1,26,?,0,0,0,0,0,0)",
                         (sect_id, subsection[1]),
                     )
+                elif subsection[0] == "kind11":
+                    b, h_, u_, t_, d_, f_ = subsection[1]
+                    connection.execute(
+                        "INSERT INTO tblSubSectionSect VALUES (?,11,1,13,'',?,?,?,?,?,?)",
+                        (sect_id, b, h_, u_, t_, d_, f_),
+                    )
                 else:
                     b, h_, u_, t_, d_, f_ = subsection[1]
                     connection.execute(
@@ -235,7 +241,9 @@ class PecConversionTests(unittest.TestCase):
             beam_sections = [row[0] for row in connection.execute("SELECT BSection FROM tbl1")]
             column_sections = [row[0] for row in connection.execute("SELECT CSection FROM tbl2")]
             column_columns = [row[1] for row in connection.execute("PRAGMA table_info(tbl2)")]
-        self.assertEqual(["H400X150X10X20@PEC"], beam_sections)
+        # 2026-09-09 规则：夹具梁截面 (400,150) 命中国标 HN400x150，
+        # 厚度由 10X20 修正为 GB 8X13。
+        self.assertEqual(["H400X150X8X13@PEC"], beam_sections)
         self.assertEqual(["H244X175X8X12@PEC"] * 4, column_sections)
         self.assertFalse(any(name.startswith("Ydb") for name in column_columns))
 
@@ -408,7 +416,9 @@ class PecConversionTests(unittest.TestCase):
             ).fetchall()
             sections = [row[0] for row in rows]
         self.assertEqual(["H244X175X8X12@PEC"] * 4, sections[:4])
-        self.assertEqual("H400X200X8X16@PEC", sections[4])
+        # 2026-09-09 规则：(400,200) 命中唯一国标规格 HN400x200，
+        # 厚度按 GB 8X13 输出（主表/子表数值 8X16 视为编辑残留）。
+        self.assertEqual("H400X200X8X13@PEC", sections[4])
         self.assertEqual((7.0, 8.0, 9.0), rows[4][1:])
 
     def test_upper_contract_metadata_is_written_without_touching_foundation_keys(self):
@@ -959,9 +969,12 @@ class PecConversionTests(unittest.TestCase):
             )
             connection.commit()
         result = CONVERTER.convert_ydb(source, output)
-        self.assertEqual(2, len(result["warnings"]))
+        # 2026-09-09 起：夹具梁 201(400X150, 子表Kind=12) 命中唯一国标规格，
+        # 厚度按 GB 8X13 覆盖并新增一条独立警告；柱 302 无子表仍走主值回退。
+        self.assertEqual(3, len(result["warnings"]))
         self.assertTrue(any("柱顶" in warning for warning in result["warnings"]))
         self.assertTrue(any("SectID=302" in warning for warning in result["warnings"]))
+        self.assertTrue(any("国标" in warning for warning in result["warnings"]))
         with closing(sqlite3.connect(output)) as connection:
             placement = connection.execute(
                 "SELECT EccX,EccY,Rotation FROM tbl2 ORDER BY ID DESC LIMIT 1"
@@ -977,6 +990,66 @@ class PecConversionTests(unittest.TestCase):
         )
         self.assertEqual(["H400X200X8X13@PEC"], sections)
         self.assertEqual([], result["warnings"])
+
+    def test_gb_catalogue_overrides_stale_main_thickness(self):
+        # 颛桥 SectID=33508 实证形态（用户 2026-09-09 于 YJK 确证为
+        # HN400*200）：主表 u/f=12/18 为编辑残留脏值；子表仅 b/h、无打包串、
+        # 无显式厚度。(H,B)=(400,200) 命中唯一国标规格 → 厚度按 GB 8X13。
+        result, sections = convert_single_209_beam(
+            (400, 200, 12, 18), ("numeric", (200, 400, 0, 0, 0, 0))
+        )
+        self.assertEqual(["H400X200X8X13@PEC"], sections)
+        self.assertTrue(
+            any("国标" in warning for warning in result["warnings"]),
+            result["warnings"],
+        )
+
+    def test_gb_catalogue_does_not_apply_without_subsection(self):
+        # 无子表行：走既有“主值回退”路径（逐截面告警），不做国标反查——
+        # 无法确认其是否属于 Kind=12 数值自定义形态。
+        result, sections = convert_single_209_beam((400, 200, 12, 18))
+        self.assertEqual(["H400X200X12X18@PEC"], sections)
+        self.assertFalse(
+            any("国标" in warning for warning in result["warnings"]),
+            result["warnings"],
+        )
+
+    def test_pec_welded_subsection_kind11_is_never_overridden(self):
+        # 子表 Kind=11 = PEC 焊接H（翼缘 25 为 PEC 设计值，如颛桥主柱
+        # H500X200X10X25）：尺寸撞国标（HN500x200=10X16）也不覆盖。
+        result, sections = convert_single_209_beam(
+            (500, 200, 10, 25), ("kind11", (200, 500, 10, 500, 200, 25))
+        )
+        self.assertEqual(["H500X200X10X25@PEC"], sections)
+        self.assertFalse(
+            any("国标" in warning for warning in result["warnings"]),
+            result["warnings"],
+        )
+
+    def test_custom_welded_size_without_gb_gauge_keeps_main_thickness(self):
+        # (600,150) 无国标规格：自定义焊接截面，主表厚度保留（33503 实证）。
+        result, sections = convert_single_209_beam(
+            (600, 150, 10, 16), ("numeric", (150, 600, 0, 0, 0, 0))
+        )
+        self.assertEqual(["H600X150X10X16@PEC"], sections)
+        self.assertFalse(
+            any("国标" in warning for warning in result["warnings"]),
+            result["warnings"],
+        )
+
+    def test_subsection_numeric_thickness_at_gb_size_is_overridden(self):
+        # 33508 真实形态：子表数值列镜像主表的脏值 12/18（SubKind=13 与
+        # 真自定义截面同构，数据层无区分信号）——按 2026-09-09 规则，
+        # (H,B) 命中唯一国标规格即按国标取厚度，覆盖后逐截面告警。
+        result, sections = convert_single_209_beam(
+            (400, 200, 12, 18), ("numeric", (200, 400, 12, 400, 200, 18))
+        )
+        self.assertEqual(["H400X200X8X13@PEC"], sections)
+        self.assertTrue(
+            any("国标" in warning and "SectID=903" in warning
+                for warning in result["warnings"]),
+            result["warnings"],
+        )
 
     def test_section_text_contract_matches_csharp_parser(self):
         # 契约权威来源：CreateNewExtern/SectionTextParser.cs（只读参考仓库
