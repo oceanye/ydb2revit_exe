@@ -241,6 +241,18 @@ STANDARD_HOT_ROLLED_H = {
 }
 
 
+def _build_standard_size_index():
+    """(H, B) 反查索引：同尺寸跨系列唯一才可反查；碰撞则置 None 弃用。"""
+    index = {}
+    for (_series, height, width), thickness in STANDARD_HOT_ROLLED_H.items():
+        key = (height, width)
+        index[key] = None if key in index else thickness
+    return index
+
+
+STANDARD_HOT_ROLLED_H_BY_SIZE = _build_standard_size_index()
+
+
 def _packed_hot_rolled_h_dimensions(subsection):
     """Decode a Kind-26 packed subsection ShapeVal into (h, b, tw, tf).
 
@@ -322,6 +334,42 @@ def _packed_hot_rolled_h_dimensions(subsection):
     return None
 
 
+def _gb_thickness_override(section, subsection):
+    """(gb_web, gb_flange) when this Kind-209 section must take the GB/T
+    11263 hot-rolled catalogue thickness for its (H, B); None otherwise.
+
+    2026-09-09 rule (user-verified in YJK), scoped to the numeric-custom
+    subsection form (tblSubSectionSect.Kind=12, no Kind-26 packed string —
+    颛桥 SectID=33508 stored 12/18 for HN400x200=8/13 in BOTH tables, YJK
+    displays HN400*200): when (H, B) matches exactly one GB gauge, the
+    catalogue thickness wins over the stale numeric values.
+
+    Excluded forms:
+    * subsection Kind=11 — PEC 焊接H（翼缘 20~30 为 PEC 设计值，如
+      H500X200X10X25 主柱），尺寸撞国标也不覆盖；
+    * Kind-26 packed strings — 既有打包解码优先级；
+    * no subsection — 主值回退路径（逐截面告警）不变。
+    Genuinely custom sizes simply miss every GB gauge (600x150/350x150).
+    Every override is named in warnings, so a deliberate custom section at
+    a GB size can be whitelisted later.
+    """
+    if _section_kind(section) != 209:
+        return None
+    if subsection is None:
+        return None
+    if _as_int(_value(subsection, "Kind"), 0) != 12:
+        return None  # 子表 Kind=11（PEC 焊接H）等形态不适用
+    if _packed_hot_rolled_h_dimensions(subsection) is not None:
+        return None  # 打包串定义为准（既有优先级规则）
+    height = _first_positive(_value(section, "t"), _value(subsection, "t"), _value(subsection, "h"))
+    width = _first_positive(_value(section, "d"), _value(subsection, "d"), _value(subsection, "b"))
+    if height is None or width is None:
+        return None
+    return STANDARD_HOT_ROLLED_H_BY_SIZE.get(
+        (int(round(height)), int(round(width)))
+    )
+
+
 def _h_dimensions(section, subsection=None):
     """Return conventional (height, flange width, web, flange) dimensions."""
     if section is None:
@@ -339,6 +387,9 @@ def _h_dimensions(section, subsection=None):
         # also be repeated in tblSubSectionSect.
         height = _first_positive(_value(section, "t"), _value(subsection, "t"), _value(subsection, "h"))
         width = _first_positive(_value(section, "d"), _value(subsection, "d"), _value(subsection, "b"))
+        gb = _gb_thickness_override(section, subsection)
+        if gb is not None:
+            return height, width, gb[0], gb[1]
         web = _first_positive(_value(section, "u"), _value(subsection, "u"))
         flange = _first_positive(_value(section, "f"), _value(subsection, "f"))
     elif kind == 2:
@@ -713,6 +764,9 @@ def _convert_ydb_in_place(source_path, destination_path):
     # must be named in the conversion warnings, never silently (handoff
     # "Kind26短格式解码与1117矛盾截面修正" §2.3).
     main_value_fallback_sections = {}
+    # 2026-09-09 规则命中的截面：主表厚度被国标规格覆盖时逐截面点名，
+    # 绝不静默（对齐 main_value_fallback 的披露口径）。
+    gb_thickness_override_sections = {}
 
     def _note_unresolved_pec(member_kind, section, subsection):
         if _h_dimensions(section, subsection) is None:
@@ -734,6 +788,21 @@ def _convert_ydb_in_place(source_path, destination_path):
         key = (member_kind, _value(section, "ID"))
         main_value_fallback_sections[key] = main_value_fallback_sections.get(key, 0) + 1
 
+    def _note_gb_thickness_override(member_kind, section, subsection):
+        gb = _gb_thickness_override(section, subsection)
+        if gb is None:
+            return
+        main_web = _first_positive(_value(section, "u"), _value(subsection, "u"))
+        main_flange = _first_positive(_value(section, "f"), _value(subsection, "f"))
+        if main_web is not None and main_flange is not None and \
+                abs(main_web - gb[0]) <= 0.05 and abs(main_flange - gb[1]) <= 0.05:
+            return  # 主表本就是国标值，输出不变，无需点名
+        key = (member_kind, _value(section, "ID"))
+        gb_thickness_override_sections[key] = (
+            gb_thickness_override_sections.get(key, (0, main_web, main_flange, gb))[0] + 1,
+            main_web, main_flange, gb,
+        )
+
     for floor in floors:
         standard_floor_id = _value(floor, "StdFlrID")
         bottom_z = _as_float(_value(floor, "LevelB"))
@@ -752,6 +821,9 @@ def _convert_ydb_in_place(source_path, destination_path):
                     "梁", section, subsections.get(_value(segment, "SectID"))
                 )
                 _note_main_value_fallback(
+                    "梁", section, subsections.get(_value(segment, "SectID"))
+                )
+                _note_gb_thickness_override(
                     "梁", section, subsections.get(_value(segment, "SectID"))
                 )
                 section_text = _h_section_name(
@@ -829,6 +901,9 @@ def _convert_ydb_in_place(source_path, destination_path):
                     _note_main_value_fallback(
                         "柱", section, subsections.get(_value(segment, "SectID"))
                     )
+                _note_gb_thickness_override(
+                    "柱", section, subsections.get(_value(segment, "SectID"))
+                )
             section_text = (
                 _h_section_name(section, subsections.get(_value(segment, "SectID")), pec=True)
                 if is_pec_h else _legacy_section_text(section)
@@ -1166,6 +1241,21 @@ def _convert_ydb_in_place(source_path, destination_path):
                 member_kind, sect_id, count)
             for (member_kind, sect_id), count in sorted(
                 main_value_fallback_sections.items(),
+                key=lambda item: (item[0][0], _as_int(item[0][1])),
+            )
+        ])
+
+    if gb_thickness_override_sections:
+        def _fmt_thickness(value):
+            return "?" if value is None else _format_number(value)
+
+        warnings.extend([
+            "%s截面 SectID=%s 尺寸命中唯一国标热轧H规格，厚度按国标 %sX%s 输出（主表 %sX%s 为编辑残留，%d 根构件）" % (
+                member_kind, sect_id,
+                _format_number(gb[0]), _format_number(gb[1]),
+                _fmt_thickness(main_web), _fmt_thickness(main_flange), count)
+            for (member_kind, sect_id), (count, main_web, main_flange, gb) in sorted(
+                gb_thickness_override_sections.items(),
                 key=lambda item: (item[0][0], _as_int(item[0][1])),
             )
         ])
