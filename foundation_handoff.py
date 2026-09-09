@@ -9,8 +9,8 @@ is intentionally narrow and explicit:
 * vertical piles;
 * reinforcement is user-authored in the handoff database, not read from YDB.
 
-The extracted data extends the existing Revit handoff database as tbl5-tbl7:
-pile types, cap types (including local pile layouts), and cap placements.
+The extracted data extends the existing Revit handoff database as tbl5-tbl7
+for pile-cap models, or tbl5/tbl8/tbl9 for raft/free-pile models.
 Geometry and active type rows are rebuilt on every extraction, while manually
 entered reinforcement is restored by stable geometry hashes when the
 corresponding dimensions have not changed.  Existing tbl1-tbl4 are never
@@ -68,6 +68,7 @@ REQUIRED_SOURCE_TABLES = {
     "app_Pile",
     "node",
 }
+RAFT_SOURCE_TABLES = {"RaftSlab", "RaftCornerPoint", "app_Pile", "DEF_Pile"}
 
 
 class FoundationDataError(ValueError):
@@ -297,6 +298,46 @@ def _create_destination_schema(connection):
         );
 
         CREATE INDEX idx_tbl7_type ON tbl7(CapTypeID);
+
+        CREATE TABLE IF NOT EXISTS tbl8 (
+            ID INTEGER PRIMARY KEY,
+            RegionKey TEXT NOT NULL UNIQUE,
+            SourceRaftID INTEGER NOT NULL,
+            SourceLID INTEGER NOT NULL,
+            PolygonJson TEXT NOT NULL,
+            Thickness REAL NOT NULL,
+            BottomZ REAL NOT NULL,
+            BaseZ REAL,
+            ParentRegionID INTEGER,
+            UserTypeName TEXT NOT NULL DEFAULT '',
+            Notes TEXT NOT NULL DEFAULT '',
+            ExtraJson TEXT NOT NULL DEFAULT '{}',
+            UpdatedAt TEXT NOT NULL DEFAULT '',
+            RvtID TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS tbl9 (
+            ID INTEGER PRIMARY KEY,
+            SourceID INTEGER NOT NULL UNIQUE,
+            X REAL NOT NULL,
+            Y REAL NOT NULL,
+            Z REAL NOT NULL,
+            Length REAL NOT NULL,
+            PileTypeID INTEGER NOT NULL,
+            Kind INTEGER NOT NULL,
+            DaisFlag INTEGER NOT NULL,
+            SourceUpperID INTEGER NOT NULL,
+            HostRegionID INTEGER,
+            Notes TEXT NOT NULL DEFAULT '',
+            ExtraJson TEXT NOT NULL DEFAULT '{}',
+            UpdatedAt TEXT NOT NULL DEFAULT '',
+            RvtID TEXT,
+            FOREIGN KEY(PileTypeID) REFERENCES tbl5(ID),
+            FOREIGN KEY(HostRegionID) REFERENCES tbl8(ID)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_tbl9_type ON tbl9(PileTypeID);
+        CREATE INDEX IF NOT EXISTS idx_tbl9_region ON tbl9(HostRegionID);
         """
     )
 
@@ -336,8 +377,9 @@ def _existing_rebar(connection, table_names, fields):
     return values
 
 
-def _drop_foundation_contract_tables(connection):
-    for table_name in ("tbl7", "tbl6", "tbl5"):
+def _drop_foundation_contract_tables(connection, free_piles=False):
+    table_names = ("tbl9", "tbl8", "tbl7", "tbl6", "tbl5") if free_piles else ("tbl7", "tbl6", "tbl5")
+    for table_name in table_names:
         connection.execute("DROP TABLE IF EXISTS " + _quote_identifier(table_name))
 
 
@@ -544,6 +586,225 @@ def _extract_source_model(connection):
     return pile_types, cap_types, cap_placements, pile_instance_count
 
 
+def _point_in_polygon(x, y, polygon):
+    inside = False
+    for index, (x1, y1) in enumerate(polygon):
+        x2, y2 = polygon[(index + 1) % len(polygon)]
+        cross = (x - x1) * (y2 - y1) - (y - y1) * (x2 - x1)
+        dot = (x - x1) * (x - x2) + (y - y1) * (y - y2)
+        if abs(cross) <= 1e-4 and dot <= 1e-3:
+            return True
+        if ((y1 > y) != (y2 > y)) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1:
+            inside = not inside
+    return inside
+
+
+def _extract_raft_free_piles(connection):
+    """Extract raft regions and one independent record for every free pile."""
+    tables = _table_names(connection)
+    missing = sorted(RAFT_SOURCE_TABLES - tables)
+    if missing:
+        raise FoundationDataError(
+            "raft/free-pile YDB is missing tables: " + ", ".join(missing)
+        )
+    cap_definitions = _rows(connection, "DEF_dais") if "DEF_dais" in tables else []
+    cap_apps = _rows(connection, "app_dais") if "app_dais" in tables else []
+    if cap_definitions or cap_apps:
+        raise FoundationDataError(
+            "YDB mixes raft/free-pile regions with pile-cap definitions"
+        )
+
+    slabs = _rows(connection, "RaftSlab")
+    corners = defaultdict(list)
+    for row in _rows(connection, "RaftCornerPoint"):
+        corners[int(row["RaftID"])].append((float(row["ptx"]), float(row["pty"])))
+    regions = []
+    region_by_lid = {}
+    for row in slabs:
+        source_lid = int(row["lID"])
+        source_raft_id = source_lid
+        polygon = _clean_polygon(
+            corners.get(source_raft_id, []),
+            "raft region lID {}".format(source_lid),
+        )
+        payload = {
+            "source_raft_id": source_raft_id,
+            "source_lid": source_lid,
+            "polygon": polygon,
+            "thickness": _clean_number(row["thick"]),
+            "bottom_z": _clean_number(float(row["BotElevat"]) * 1000.0),
+            "base_z": _clean_number(row["baseZ"]),
+        }
+        region = dict(payload)
+        region["region_key"] = _stable_key("RAFT", payload)
+        regions.append(region)
+        region_by_lid[source_lid] = region
+    regions.sort(key=lambda item: (item["source_lid"], item["region_key"]))
+    for index, region in enumerate(regions, 1):
+        region["id"] = index
+
+    definitions = {int(row["ID"]): row for row in _rows(connection, "DEF_Pile")}
+    if not definitions:
+        raise FoundationDataError("raft/free-pile YDB contains no pile definitions")
+    pile_types = {}
+    piles = []
+    for row in _rows(connection, "app_Pile"):
+        if any(abs(float(row[name] or 0)) > 1e-9 for name in ("fKn", "fKm", "fALFQ") if name in row.keys()):
+            raise FoundationDataError("inclined pile parameters are present; only vertical piles are supported")
+        kind = int(row["kind"])
+        pile_definition_id = kind if kind in definitions else (next(iter(definitions)) if len(definitions) == 1 else None)
+        if pile_definition_id is None:
+            raise FoundationDataError(
+                "free pile {} kind {} does not map uniquely to DEF_Pile".format(row["ID"], kind)
+            )
+        definition = definitions[pile_definition_id]
+        section_b = float(definition["B"] or 0)
+        section_h = float(definition["H"] or 0)
+        if section_b <= 0 or section_h > 0:
+            raise FoundationDataError("free pile definition {} is not a round pile".format(pile_definition_id))
+        pile_length = float(row["idaispilelen"] or 0) * 1000.0
+        if pile_length <= 0:
+            raise FoundationDataError("free pile {} has no positive pile length".format(row["ID"]))
+        type_payload = {"diameter": _clean_number(section_b), "length": _clean_number(pile_length)}
+        type_key = _stable_key("PILE", type_payload)
+        pile_types.setdefault(type_key, type_payload)
+        x, y, z = float(row["x"]), float(row["y"]), float(row["z"])
+        candidates = [
+            region for region in regions
+            if _point_in_polygon(x, y, region["polygon"])
+            and abs(z - region["bottom_z"]) <= 0.01
+        ]
+        host = candidates[0]["id"] if len(candidates) == 1 else None
+        notes = ""
+        extra = {}
+        if len(candidates) > 1:
+            notes = "ambiguous raft boundary candidate"
+            extra["CandidateRegionIDs"] = [item["id"] for item in candidates]
+        elif not candidates:
+            notes = "no unique raft region match"
+        piles.append({
+            "source_id": int(row["ID"]),
+            "x": _clean_number(x),
+            "y": _clean_number(y),
+            "z": _clean_number(z),
+            "length": _clean_number(pile_length),
+            "pile_type_key": type_key,
+            "kind": kind,
+            "dais_flag": int(row["DaisFlag"]),
+            "source_upper_id": int(row["idUp"]),
+            "host_region_id": host,
+            "notes": notes,
+            "extra_json": _json(extra),
+        })
+    return pile_types, regions, piles
+
+
+def _is_raft_free_pile_model(connection):
+    tables = _table_names(connection)
+    if not RAFT_SOURCE_TABLES.issubset(tables):
+        return False
+    has_caps = any(
+        name in tables and connection.execute(
+            "SELECT 1 FROM " + _quote_identifier(name) + " LIMIT 1"
+        ).fetchone()
+        for name in ("DEF_dais", "app_dais")
+    )
+    return not has_caps
+
+
+def _convert_raft_free_piles_in_place(source_path, destination_path):
+    source = _source_connection(source_path)
+    try:
+        pile_types, regions, piles = _extract_raft_free_piles(source)
+    finally:
+        source.close()
+    pile_type_ids = {key: index for index, key in enumerate(sorted(pile_types), 1)}
+    destination = sqlite3.connect(str(destination_path))
+    try:
+        destination.execute("PRAGMA foreign_keys=ON")
+        with destination:
+            pile_rebar = _existing_rebar(
+                destination, ("FoundationPileRebar", "tbl5"), PILE_REBAR_FIELDS
+            )
+            _drop_foundation_contract_tables(destination, free_piles=True)
+            _create_destination_schema(destination)
+            for type_key in sorted(pile_types):
+                item = pile_types[type_key]
+                row = {
+                    "ID": pile_type_ids[type_key],
+                    "TypeKey": type_key,
+                    "Diameter": item["diameter"],
+                    "Length": item["length"],
+                }
+                row.update(_restored_rebar(
+                    pile_rebar, type_key, PILE_REBAR_FIELDS,
+                    nullable_fields=("DenseZoneLength", "Cover"),
+                ))
+                destination.execute(
+                    """INSERT INTO tbl5(
+                        ID,TypeKey,Diameter,Length,UserTypeName,
+                        LongitudinalRebar,StirrupRebar,DenseStirrupRebar,
+                        DenseZoneLength,Cover,Notes,ExtraJson,UpdatedAt
+                    ) VALUES (
+                        :ID,:TypeKey,:Diameter,:Length,:UserTypeName,
+                        :LongitudinalRebar,:StirrupRebar,:DenseStirrupRebar,
+                        :DenseZoneLength,:Cover,:Notes,:ExtraJson,:UpdatedAt
+                    )""",
+                    row,
+                )
+            for region in regions:
+                destination.execute(
+                    """INSERT INTO tbl8(
+                        ID,RegionKey,SourceRaftID,SourceLID,PolygonJson,
+                        Thickness,BottomZ,BaseZ,ParentRegionID,UserTypeName,
+                        Notes,ExtraJson,UpdatedAt,RvtID
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        region["id"], region["region_key"], region["source_raft_id"],
+                        region["source_lid"], _json(region["polygon"]),
+                        region["thickness"], region["bottom_z"], region["base_z"],
+                        None, "", "", "{}", "", None,
+                    ),
+                )
+            for index, pile in enumerate(piles, 1):
+                destination.execute(
+                    """INSERT INTO tbl9(
+                        ID,SourceID,X,Y,Z,Length,PileTypeID,Kind,DaisFlag,
+                        SourceUpperID,HostRegionID,Notes,ExtraJson,UpdatedAt,RvtID
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        index, pile["source_id"], pile["x"], pile["y"], pile["z"],
+                        pile["length"], pile_type_ids[pile["pile_type_key"]],
+                        pile["kind"], pile["dais_flag"], pile["source_upper_id"],
+                        pile["host_region_id"], pile["notes"], pile["extra_json"], "", None,
+                    ),
+                )
+            destination.execute("DELETE FROM handoff_meta WHERE Key LIKE 'Foundation.%'")
+            metadata = {
+                "Foundation.SchemaVersion": str(FOUNDATION_SCHEMA_VERSION),
+                "Foundation.DataSource": "YDB_ONLY",
+                "Foundation.SourceFile": str(source_path),
+                "Foundation.SourceSHA256": _source_sha256(source_path),
+                "Foundation.ExtractedAt": _utc_now(),
+                "Foundation.Scope": "RAFT_FREE_PILES",
+                "Foundation.ContractTables": "tbl5,tbl8,tbl9",
+                "Foundation.ContractVersion": "RAFT_FREE_PILES_V1",
+                "Foundation.PileZSemantics": "RAFT_BOTTOM_CANDIDATE",
+            }
+            destination.executemany(
+                "INSERT OR REPLACE INTO handoff_meta(Key,Value) VALUES (?,?)",
+                sorted(metadata.items()),
+            )
+    finally:
+        destination.close()
+    return {
+        "source": str(source_path), "destination": str(destination_path),
+        "data_source": "YDB_ONLY", "scope": "RAFT_FREE_PILES",
+        "raft_regions": len(regions), "piles": len(piles),
+        "pile_types": len(pile_types),
+    }
+
+
 def _convert_foundation_ydb_in_place(source_path, destination_path):
     """Write foundation tables into an already isolated staging database."""
     source_path = Path(source_path).expanduser().resolve()
@@ -554,6 +815,8 @@ def _convert_foundation_ydb_in_place(source_path, destination_path):
 
     source = _source_connection(source_path)
     try:
+        if _is_raft_free_pile_model(source):
+            return _convert_raft_free_piles_in_place(source_path, destination_path)
         pile_types, cap_types, placements, pile_count = _extract_source_model(source)
     finally:
         source.close()
@@ -698,7 +961,7 @@ def _convert_foundation_ydb_in_place(source_path, destination_path):
 
 
 def convert_foundation_ydb(source_path, destination_path):
-    """Atomically rebuild tbl5-tbl7 while preserving every other database object."""
+    """Atomically rebuild the foundation contract while preserving other data."""
     source_path = Path(source_path).expanduser().resolve()
     destination_path = Path(destination_path).expanduser().resolve()
     if not source_path.is_file():
@@ -725,7 +988,7 @@ def read_editor_data(database_path):
     try:
         connection.row_factory = sqlite3.Row
         tables = _table_names(connection)
-        required = {"tbl5", "tbl6", "tbl7", "handoff_meta"}
+        required = {"handoff_meta"}
         if not required.issubset(tables):
             raise FoundationDataError("handoff database has no extracted foundation data")
         meta = {
@@ -734,6 +997,31 @@ def read_editor_data(database_path):
                 "SELECT Key,Value FROM handoff_meta WHERE Key LIKE 'Foundation.%'"
             )
         }
+        if meta.get("Scope") == "RAFT_FREE_PILES":
+            required = {"tbl5", "tbl8", "tbl9", "handoff_meta"}
+            if not required.issubset(tables):
+                raise FoundationDataError("handoff database has incomplete raft/free-pile data")
+            regions = _dict_rows(connection, "SELECT * FROM tbl8 ORDER BY ID")
+            piles = _dict_rows(connection, "SELECT * FROM tbl9 ORDER BY ID")
+            pile_types = _dict_rows(connection, "SELECT * FROM tbl5 ORDER BY ID")
+            for region in regions:
+                region["VertexCount"] = len(json.loads(region["PolygonJson"]))
+            pile_counts = defaultdict(int)
+            for pile in piles:
+                pile_counts[int(pile["PileTypeID"])] += 1
+            for pile_type in pile_types:
+                pile_type["InstanceCount"] = pile_counts.get(pile_type["ID"], 0)
+            return {
+                "meta": meta,
+                "summary": {
+                    "raft_regions": len(regions),
+                    "piles": len(piles),
+                    "pile_types": len(pile_types),
+                },
+                "raft_regions": regions,
+                "piles": piles,
+                "pile_types": pile_types,
+            }
         cap_types = _dict_rows(
             connection,
             "SELECT * FROM tbl6 ORDER BY ID",

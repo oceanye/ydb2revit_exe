@@ -17,7 +17,7 @@ UPPER_MODE = "upper"
 FOUNDATION_MODE = "foundation"
 TARGET_TABLES = {
     UPPER_MODE: frozenset(("tbl1", "tbl2", "tbl3", "tbl4")),
-    FOUNDATION_MODE: frozenset(("tbl5", "tbl6", "tbl7")),
+    FOUNDATION_MODE: frozenset(("tbl5", "tbl6", "tbl7", "tbl8", "tbl9")),
 }
 METADATA_PREFIXES = {
     UPPER_MODE: "Upper.",
@@ -227,7 +227,7 @@ def _full_database_sha256(path):
 
 
 def foundation_contract_sha256(path):
-    """Hash tbl5-tbl7 schemas/rows and all Foundation.* metadata rows."""
+    """Hash foundation contract tables and all Foundation.* metadata rows."""
     digest = hashlib.sha256()
     connection = _read_only_connection(path)
     try:
@@ -238,7 +238,7 @@ def foundation_contract_sha256(path):
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-        for table_name in ("tbl5", "tbl6", "tbl7"):
+        for table_name in ("tbl5", "tbl6", "tbl7", "tbl8", "tbl9"):
             if table_name in tables:
                 _feed(digest, _table_payload(connection, table_name))
             else:
@@ -364,7 +364,7 @@ def atomic_update_database(destination_path, mode, writer):
         )
         if foundation_after != foundation_before:
             raise ScopeViolationError(
-                "upper extraction changed tbl5-tbl7 or Foundation.* metadata"
+                "upper extraction changed foundation contract tables or Foundation.* metadata"
             )
 
         if destination_existed:
