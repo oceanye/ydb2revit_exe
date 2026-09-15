@@ -1,0 +1,45 @@
+{
+  "baseline": "35c3f30",
+  "merged_branch_tip": "4c5c412",
+  "exe_sha256": "66BE2E9A324473E8D6A45E18515B686C70E90DB64A14D63CD8D2468F61B0D007",
+  "exe_size_bytes": 9588594,
+  "source_sha256": {
+    "颛桥整体桩基-Jccad_0.ydb": "9582A0F49A2975CDF7ADA55A0F61617CD09E3F59650A5CBDB61AB87CE9DD6B15",
+    "jccad.ydb": "13E76285408C16E026BD05CA0072804C319AAEDEA415220F49960C5A5D2EFE6A",
+    "dtlmodelsw.ydb": "C081269A59C06FCA23EACE9809F8D688FF3FEF76CD26F773161463CE40052496"
+  },
+  "raft": {
+    "regions": 14,
+    "piles": 801,
+    "all_counterclockwise": true,
+    "unchanged_pile_rows": true,
+    "python_exe_tables_equal": true,
+    "changed_region_keys": [
+      {
+        "id": 4,
+        "source_lid": 4,
+        "old_key": "RAFT-A02F8CCE492D5373",
+        "new_key": "RAFT-558AA7C1D568CD8E"
+      },
+      {
+        "id": 7,
+        "source_lid": 7,
+        "old_key": "RAFT-3C9A3D7CAF1C5580",
+        "new_key": "RAFT-16CA6CD005C28311"
+      },
+      {
+        "id": 8,
+        "source_lid": 8,
+        "old_key": "RAFT-8671C8218A22BAF1",
+        "new_key": "RAFT-A75D3682A50A1E5C"
+      }
+    ]
+  },
+  "upper_foundation_bidirectional_preservation": true,
+  "cap": {
+    "unchanged_tbl5_tbl6_tbl7": true,
+    "types": 5,
+    "placements": 88
+  },
+  "source_files_unchanged": true
+}

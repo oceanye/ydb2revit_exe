@@ -556,5 +556,65 @@ class FoundationHandoffTests(unittest.TestCase):
         self.assertEqual(173, summary["piles"])
 
 
+class RaftPolygonWindingTests(unittest.TestCase):
+    """tbl8.PolygonJson 顶点方向契约：一律逆时针（鞋带 2A>0）。
+
+    回归背景（插件端 2026-09-10 handoff）：颛桥 0902 基础库 14 块筏板中
+    3 块（SourceRaftID=4/7/8）的 RaftCornerPoint 存储为顺时针，转换器曾按
+    存储顺序直通写出，触发插件端方向校验。修复 = _clean_polygon 入口统一
+    归一化，tbl8 筏板区域与 tbl6 承台轮廓同时受益。
+    """
+
+    def _shoelace(self, polygon):
+        return sum(
+            polygon[i][0] * polygon[(i + 1) % len(polygon)][1]
+            - polygon[(i + 1) % len(polygon)][0] * polygon[i][1]
+            for i in range(len(polygon))
+        )
+
+    def test_clockwise_raft_corners_are_normalised_counterclockwise(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "raft.ydb"
+            destination = Path(temp_dir) / "out.db"
+            connection = sqlite3.connect(str(source))
+            connection.executescript(
+                """
+                CREATE TABLE RaftSlab (ID INTEGER, lID INTEGER, thick REAL, BotElevat REAL, baseZ REAL);
+                CREATE TABLE RaftCornerPoint (ID INTEGER, RaftID INTEGER, ptx REAL, pty REAL);
+                CREATE TABLE app_Pile (ID INTEGER, x REAL, y REAL, z REAL, kind INTEGER, DaisFlag INTEGER, idUp INTEGER, idaispilelen REAL);
+                CREATE TABLE DEF_Pile (ID INTEGER, B REAL, H REAL);
+                CREATE TABLE DEF_dais (ID INTEGER);
+                CREATE TABLE app_dais (ID INTEGER);
+                INSERT INTO RaftSlab VALUES (1, 10, 500, -10.0, -7200);
+                INSERT INTO RaftSlab VALUES (2, 20, 500, -10.0, -7200);
+                -- 区域10：逆时针存储（(0,0)→(10,0)→(10,10)→(0,10)）
+                INSERT INTO RaftCornerPoint VALUES (1, 10, 0, 0), (2, 10, 10, 0), (3, 10, 10, 10), (4, 10, 0, 10);
+                -- 区域20：顺时针存储（同轮廓反向）
+                INSERT INTO RaftCornerPoint VALUES (5, 20, 0, 0), (6, 20, 0, 10), (7, 20, 10, 10), (8, 20, 10, 0);
+                INSERT INTO app_Pile VALUES (1, 5, 5, -10000, 0, -1, 0, 25), (2, 5, 5, -10000, 0, -1, 0, 25);
+                INSERT INTO DEF_Pile VALUES (1, 600, 0);
+                """
+            )
+            connection.commit()
+            connection.close()
+            summary = convert_foundation_ydb(str(source), str(destination))
+            self.assertEqual(2, summary["raft_regions"])
+            connection = sqlite3.connect(str(destination))
+            try:
+                rows = connection.execute(
+                    "SELECT SourceRaftID, PolygonJson FROM tbl8 ORDER BY SourceRaftID"
+                ).fetchall()
+            finally:
+                connection.close()
+            self.assertEqual(2, len(rows))
+            for source_raft_id, polygon_json in rows:
+                polygon = json.loads(polygon_json)
+                self.assertGreater(
+                    self._shoelace(polygon),
+                    0,
+                    "SourceRaftID={} 仍为顺时针".format(source_raft_id),
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

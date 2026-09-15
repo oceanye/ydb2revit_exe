@@ -156,6 +156,12 @@ def _clean_polygon(points, label):
         raise FoundationDataError(label + " has fewer than three polygon points")
     if abs(_polygon_area(cleaned)) < 1e-6:
         raise FoundationDataError(label + " has a zero-area polygon")
+    # 契约（基础筏板自由布板实施计划 20260909 / 插件端 2026-09-10 handoff）：
+    # PolygonJson 顶点一律逆时针（鞋带 2A>0）。YJK RaftCornerPoint 等源表
+    # 的存储顺序不保证方向（颛桥 0902 实测 14 块筏板中 3 块为顺时针），
+    # 故在唯一入口统一归一化——tbl8 筏板区域与 tbl6 承台轮廓同时受益。
+    if _polygon_area(cleaned) < 0:
+        cleaned.reverse()
     return cleaned
 
 
