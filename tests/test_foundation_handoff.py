@@ -609,11 +609,33 @@ class RaftPolygonWindingTests(unittest.TestCase):
             self.assertEqual(2, len(rows))
             for source_raft_id, polygon_json in rows:
                 polygon = json.loads(polygon_json)
-                self.assertGreater(
+            self.assertGreater(
                     self._shoelace(polygon),
                     0,
                     "SourceRaftID={} 仍为顺时针".format(source_raft_id),
                 )
+
+    def test_invalid_polygon_is_rejected_before_writing_tbl8(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "invalid.ydb"
+            connection = sqlite3.connect(str(source))
+            connection.executescript(
+                """
+                CREATE TABLE RaftSlab (ID INTEGER, lID INTEGER, thick REAL, BotElevat REAL, baseZ REAL);
+                CREATE TABLE RaftCornerPoint (ID INTEGER, RaftID INTEGER, ptx REAL, pty REAL);
+                CREATE TABLE app_Pile (ID INTEGER, x REAL, y REAL, z REAL, kind INTEGER, DaisFlag INTEGER, idUp INTEGER, idaispilelen REAL);
+                CREATE TABLE DEF_Pile (ID INTEGER, B REAL, H REAL);
+                CREATE TABLE DEF_dais (ID INTEGER); CREATE TABLE app_dais (ID INTEGER);
+                INSERT INTO RaftSlab VALUES (1, 1, 500, -10, -7200);
+                INSERT INTO RaftCornerPoint VALUES
+                  (1,1,0,0),(2,1,10,10),(3,1,0,10),(4,1,10,0);
+                INSERT INTO app_Pile VALUES (1,5,5,-10000,0,-1,0,25);
+                INSERT INTO DEF_Pile VALUES (1,600,0);
+                """
+            )
+            connection.commit(); connection.close()
+            with self.assertRaises(FoundationDataError):
+                convert_foundation_ydb(source, Path(temp_dir) / "out.db")
 
 
 if __name__ == "__main__":

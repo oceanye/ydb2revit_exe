@@ -144,6 +144,22 @@ def _polygon_area(points):
     )
 
 
+def _orientation(a, b, c):
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+
+def _segments_intersect(a, b, c, d):
+    """Return true for proper or collinear intersection of two segments."""
+    eps = 1e-9
+    ab1, ab2 = _orientation(a, b, c), _orientation(a, b, d)
+    cd1, cd2 = _orientation(c, d, a), _orientation(c, d, b)
+    if ((ab1 > eps and ab2 < -eps) or (ab1 < -eps and ab2 > eps)) and ((cd1 > eps and cd2 < -eps) or (cd1 < -eps and cd2 > eps)):
+        return True
+    def on_segment(p, q, r):
+        return abs(_orientation(p, q, r)) <= eps and min(p[0], r[0]) - eps <= q[0] <= max(p[0], r[0]) + eps and min(p[1], r[1]) - eps <= q[1] <= max(p[1], r[1]) + eps
+    return on_segment(a, c, b) or on_segment(a, d, b) or on_segment(c, a, d) or on_segment(c, b, d)
+
+
 def _clean_polygon(points, label):
     cleaned = []
     for point in points:
@@ -154,8 +170,17 @@ def _clean_polygon(points, label):
         cleaned.pop()
     if len(cleaned) < 3:
         raise FoundationDataError(label + " has fewer than three polygon points")
+    if len(set(cleaned)) != len(cleaned):
+        raise FoundationDataError(label + " has non-adjacent duplicate polygon points")
     if abs(_polygon_area(cleaned)) < 1e-6:
         raise FoundationDataError(label + " has a zero-area polygon")
+    for index, first in enumerate(cleaned):
+        second = cleaned[(index + 1) % len(cleaned)]
+        for other in range(index + 1, len(cleaned)):
+            if other in (index, (index + 1) % len(cleaned), (index - 1) % len(cleaned)):
+                continue
+            if _segments_intersect(first, second, cleaned[other], cleaned[(other + 1) % len(cleaned)]):
+                raise FoundationDataError(label + " has self-intersecting polygon edges")
     # 契约（基础筏板自由布板实施计划 20260909 / 插件端 2026-09-10 handoff）：
     # PolygonJson 顶点一律逆时针（鞋带 2A>0）。YJK RaftCornerPoint 等源表
     # 的存储顺序不保证方向（颛桥 0902 实测 14 块筏板中 3 块为顺时针），
